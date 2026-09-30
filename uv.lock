@@ -1137,7 +1137,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "numpy", specifier = ">=2.2" },
+    { name = "numpy", specifier = ">=2.1" },
     { name = "scikit-learn", specifier = ">=1.6" },
     { name = "scipy", specifier = ">=1.15" },
 ]
