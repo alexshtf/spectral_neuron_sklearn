@@ -52,6 +52,18 @@ eigenvalue (a concave function) or `eig_idx=dim - 1` for the largest (a convex
 function). `dim=1` gives a linear model. The initial extraction supports dense,
 unconstrained coefficient matrices.
 
+## Demos
+
+The [`sine` demo](demos/sine.py) expands the example above and plots the true
+and fitted functions. Scripts in `demos/` use `# %%` cells for interactive
+execution and also run as ordinary Python. Install the plotting and kernel
+dependencies with the `demos` group:
+
+```bash
+uv sync --group demos
+uv run --group demos python demos/sine.py
+```
+
 ## Objectives and prediction
 
 The `loss` parameter selects a mean objective over the training samples:
