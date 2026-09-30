@@ -55,13 +55,18 @@ unconstrained coefficient matrices.
 ## Demos
 
 The [`sine` demo](demos/sine.py) expands the example above and plots the true
-and fitted functions. Scripts in `demos/` use `# %%` cells for interactive
-execution and also run as ordinary Python. Install the plotting and kernel
-dependencies with the `demos` group:
+and fitted functions. The [`spirals` demo](demos/spirals.py) classifies two
+interleaved spirals as positive and negative, plotting the data and decision
+boundary with scikit-learn's `DecisionBoundaryDisplay`.
+
+Scripts in `demos/` use `# %%` cells for interactive execution and also run as
+ordinary Python. Install the plotting and kernel dependencies with the `demos`
+group:
 
 ```bash
 uv sync --group demos
 uv run --group demos python demos/sine.py
+uv run --group demos python demos/spirals.py
 ```
 
 ## Objectives and prediction
