@@ -16,7 +16,7 @@ X = rng.uniform(-1, 1, size=(256, 1))
 y = np.sin(3 * X[:, 0])
 
 # %% Fit the neuron
-neuron = SpectralNeuron()
+neuron = SpectralNeuron(dim=5, loss="squared_error", random_state=7)
 neuron.fit(X, y)
 
 # %% Predict on a dense grid
@@ -30,10 +30,4 @@ ax.plot(x_grid, true, label="True: sin(3x)", linewidth=2)
 ax.plot(x_grid, fitted, label="Spectral neuron", linestyle="--", linewidth=2)
 ax.set(xlabel="x", ylabel="f(x)", title="Fitting a sine function")
 ax.legend()
-plt.show()
-
-# %% Plot the training loss curve
-fig, ax = plt.subplots(figsize=(7, 4), layout="constrained")
-ax.plot(np.arange(1, neuron.n_iter_ + 1), neuron.loss_curve_)
-ax.set(xlabel="Epoch", ylabel="Mean squared error", title="Training loss")
 plt.show()
