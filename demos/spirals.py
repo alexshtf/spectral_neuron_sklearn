@@ -31,9 +31,8 @@ plt.show()
 
 # %% Fit the classifier
 neuron = SpectralNeuron(
-    dim=15,
+    dim=9,
     loss="log_loss",
-    learning_rate=0.03,
     max_iter=1000,
     tol=0,
     random_state=7,
