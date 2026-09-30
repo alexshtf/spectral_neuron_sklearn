@@ -1,0 +1,23 @@
+[project]
+name = "spectral-neuron-component"
+version = "0.1.0"
+description = "Scikit-learn spectral neurons with analytical gradients and Adam fitting."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+dependencies = ["numpy>=2.2", "scipy>=1.15", "scikit-learn>=1.6"]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[build-system]
+requires = ["uv_build>=0.11.26,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "spectral_neuron"
+module-root = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
