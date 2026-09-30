@@ -2,6 +2,7 @@ from itertools import product
 
 import numpy as np
 import pytest
+from scipy.optimize import check_grad
 
 import spectral_neuron._fitting as fitting
 from spectral_neuron import SpectralModel
@@ -40,21 +41,17 @@ def test_spectral_parameter_gradient_matches_finite_differences(loss):
         if loss == "log_loss"
         else prediction + np.linspace(0.2, 0.8, len(X))
     )
-    value, gradient = parameter_gradient(X, y, coefficients, 3, 1, loss)
 
-    step = 1e-6
-    numerical = np.empty_like(coefficients)
-    for index in np.ndindex(coefficients.shape):
-        plus = coefficients.copy()
-        minus = coefficients.copy()
-        plus[index] += step
-        minus[index] -= step
-        upper = loss_and_gradient(SpectralModel(plus, 3, 1)(X), y, loss)[0]
-        lower = loss_and_gradient(SpectralModel(minus, 3, 1)(X), y, loss)[0]
-        numerical[index] = (upper - lower) / (2 * step)
+    def objective(flat):
+        model = SpectralModel(flat.reshape(coefficients.shape), 3, 1)
+        return loss_and_gradient(model(X), y, loss)[0]
 
-    np.testing.assert_allclose(value, loss_and_gradient(prediction, y, loss)[0])
-    np.testing.assert_allclose(gradient, numerical, rtol=2e-5, atol=2e-7)
+    def gradient(flat):
+        return parameter_gradient(X, y, flat.reshape(coefficients.shape), 3, 1, loss)[1].ravel()
+
+    value, _ = parameter_gradient(X, y, coefficients, 3, 1, loss)
+    np.testing.assert_allclose(value, objective(coefficients.ravel()))
+    assert check_grad(objective, gradient, coefficients.ravel()) < 1e-6
 
 
 def test_losses_are_means_and_logistic_loss_is_stable_for_extreme_logits():
@@ -116,12 +113,11 @@ def test_grouped_adam_matches_dense_projector_updates(monkeypatch, eig_idx):
             axis=1,
         )
 
-    options = dict(
+    model = AdamFitter(
         dim=3, eig_idx=eig_idx, max_iter=3, batch_size=len(X),
         learning_rate=0.04, beta_1=0.6, beta_2=0.8, epsilon=0.03,
         tol=0, random_state=4,
-    )
-    model = AdamFitter(**options).fit(X, y)
+    ).fit(X, y)
     momentum = np.zeros_like(matrices)
     variance = np.zeros((len(matrices), 3))
     augmented = np.column_stack([np.ones(len(X)), X])

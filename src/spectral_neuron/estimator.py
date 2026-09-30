@@ -128,7 +128,7 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         fitter = AdamFitter(
             **(self.get_params(deep=False) | {"feature_bound": feature_bound})
         )
-        self.model_ = fitter.fit(X, y.astype(np.float64))
+        self.model_ = fitter.fit(X, y.astype(np.float64, copy=False))
         self.feature_bound_ = float(feature_bound)
         self._n_features_out = 1
         self.n_iter_ = fitter.n_iter_
@@ -143,7 +143,7 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
     def _raw_prediction(self, X):
         check_is_fitted(self, "model_")
         X = validate_data(self, X, reset=False, dtype=np.float64)
-        return self.model_(X)
+        return self.model_._predict(X)
 
     def transform(self, X: ArrayLike) -> NDArray[np.float64]:
         """Return raw eigenvalue outputs as a single feature column."""

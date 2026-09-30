@@ -85,6 +85,10 @@ class SpectralModel:
             raise ValueError(
                 f"X must have shape (..., {self.n_features}); got {X.shape}"
             )
+        return self._predict(X)
+
+    def _predict(self, X: np.ndarray) -> np.ndarray:
+        """Evaluate inputs already validated by the model or estimator."""
         packed = X @ self.coefficients[1:] + self.coefficients[0]
         return np.linalg.eigvalsh(_symmetric_matrices(packed, self.dim))[
             ..., self.eig_idx

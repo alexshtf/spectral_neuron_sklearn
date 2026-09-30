@@ -5,6 +5,7 @@ from numbers import Integral, Real
 
 import numpy as np
 from scipy.special import expit
+from sklearn.utils import gen_batches
 from sklearn.utils.validation import assert_all_finite, check_scalar
 
 from .model import SpectralModel, _resolve_eig_idx, _symmetric_matrices
@@ -93,13 +94,12 @@ def _objective(
     batch_size: int,
 ) -> float:
     total = 0.0
-    for start in range(0, len(X), batch_size):
-        stop = start + batch_size
-        packed = X[start:stop] @ coefficients[1:] + coefficients[0]
+    for batch in gen_batches(len(X), batch_size):
+        packed = X[batch] @ coefficients[1:] + coefficients[0]
         prediction = np.linalg.eigvalsh(_symmetric_matrices(packed, dim))[
             ..., eig_idx
         ]
-        value, _ = loss_and_gradient(prediction, y[start:stop], loss)
+        value, _ = loss_and_gradient(prediction, y[batch], loss)
         total += len(prediction) * value
     return total / len(X)
 
@@ -186,10 +186,8 @@ class AdamFitter:
         coefficients = (
             basis.T @ _symmetric_matrices(coefficients, self.dim) @ basis
         )[:, i, j] * np.where(i == j, 1.0, np.sqrt(2.0))
-        group = np.where(
-            (i == eig_idx) & (j == eig_idx), 0,
-            np.where((i == eig_idx) | (j == eig_idx), 1, 2),
-        )
+        # Group number counts indices outside the selected coordinate.
+        group = (i != eig_idx).astype(int) + (j != eig_idx)
         # Isometric packing makes each mean square ||G_group||_F**2 / size,
         # including both symmetric copies of off-diagonal entries. Group sizes
         # are 1, dim-1, dim*(dim-1)/2; for dim=1 only the first group exists.
@@ -204,8 +202,8 @@ class AdamFitter:
             if self.tol > 0.0:
                 previous = coefficients.copy()
             order = rng.permutation(len(X))
-            for start in range(0, len(X), self.batch_size):
-                batch = order[start : start + self.batch_size]
+            for batch_slice in gen_batches(len(X), self.batch_size):
+                batch = order[batch_slice]
                 _, gradient = parameter_gradient(
                     X[batch], y[batch], coefficients, self.dim, eig_idx, self.loss
                 )
