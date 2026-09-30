@@ -1,91 +1,67 @@
 # How spectral neurons work
 
-For usage examples, start with the [README](../README.md) or the
-[demos](../demos/). This page explains the model and its training choices.
-
-## A matrix becomes a prediction
-
-A spectral neuron learns symmetric matrices `A₀, A₁, …, Aₙ`. Given an input
-with features `x₁, …, xₙ`, it forms a weighted sum and returns one eigenvalue:
+A spectral neuron combines learned symmetric matrices using the input features
+as weights, then returns one eigenvalue:
 
 $$
 A(x) = A_0 + \sum_{i=1}^{n} x_i A_i,
 \qquad f(x) = \lambda_k(A(x)).
 $$
 
-The matrix depends linearly on the input, but its eigenvalues can vary
-nonlinearly. That is where the model's ability to fit curved functions comes
-from. With `dim=1`, the matrices are scalars and the model is an ordinary
-affine function: an intercept plus a weighted sum of features.
+Taking an eigenvalue introduces nonlinearity. With `dim=1`, this reduces to an
+intercept plus a weighted sum of features. The default selects the middle
+eigenvalue; choosing the smallest or largest gives a concave or convex function.
+See [*The Spectral Neuron*, §4](https://arxiv.org/html/2608.08003v2#S4) for the theory,
+and the [README](../README.md) for usage.
 
-Eigenvalues are ordered from smallest to largest. By default, `eig_idx=dim // 2`
-selects the middle one. The smallest eigenvalue gives a concave function of the
-input; the largest gives a convex function. An interior eigenvalue need not
-have either shape.
+## Initialization
 
-For regression, the eigenvalue is the predicted value. For binary
-classification, it is a logit: applying the sigmoid gives the probability of
-the second class in `classes_`.
+By default, the model starts nearly affine, with its selected eigenvalue
+separated from the others on the training inputs. `feature_bound="auto"` sets
+the initialization scale from the largest absolute training feature, after
+preprocessing. Training can change the initial eigenvalue gap. The construction
+and its guarantees are in [§7.2 of the paper](https://arxiv.org/html/2608.08003v2#S7.SS2).
 
-## Why initialization separates the eigenvalues
+## Our Adam variant
 
-For a simple eigenvalue with normalized eigenvector `v`, its derivative with
-respect to the matrix is `v vᵀ`. If the selected eigenvalue collides with another,
-that derivative may no longer be unique.
+This library uses a modification of Adam that is not described in the paper.
+Near initialization, gradients that change the model's affine behavior can be
+much larger than those that develop its nonlinear behavior. We give these
+different kinds of changes separate scales.
 
-The paper's initialization separates the selected eigenvalue from the others.
-It uses a base matrix with a gap around the selected eigenvalue and feature
-matrices that are multiples of the identity plus small diagonal perturbations.
-These perturbations introduce nonlinearity while keeping the initial gap open.
-
-Their size depends on a bound `R` on the absolute feature values. The default,
-`feature_bound="auto"`, uses the largest absolute training feature after any
-pipeline preprocessing, with `R=1` for all-zero inputs. Each perturbation is
-bounded by `1 / (4 n R)`, giving an initial gap of at least `1/2` whenever every
-feature has magnitude at most `R`. This is an initialization guarantee;
-training can change the gap.
-
-## Why Adam uses three gradient scales
-
-The initial model is nearly affine. Gradients that change its affine behavior
-can be much larger than gradients that develop its nonlinear behavior. The
-optimizer gives these different kinds of changes separate scales.
-
-First, a change of basis makes the selected eigenvector of the initial `A₀`
-one coordinate axis. This leaves all predictions unchanged. In these
-coordinates, each matrix gradient has three parts:
+At the start of fitting, we express every matrix in a basis where the selected
+eigenvector of the initial `A₀` is one coordinate axis. This preserves all
+predictions. For each learned matrix separately, we split the loss gradient
+with respect to that matrix into three parts:
 
 1. The diagonal entry on that axis.
 2. The off-diagonal entries in its row and column, which connect that direction
    to the others.
 3. The remaining symmetric submatrix.
 
-Adam keeps a moving average of the signed gradient for every parameter. To
-scale the updates, it also keeps a moving average of squared gradients,
-averaged separately within each of these three parts of each matrix.
-The smaller gradients therefore have their own scales. Sharing a scale within
-each part also makes the update independent of the basis chosen for the
-remaining subspace.
+As in ordinary Adam, each parameter keeps its own moving average of signed
+gradients: its momentum. We change the scale estimate: each part shares one
+moving average of its mean squared-gradient size. Each parameter's update uses
+its own momentum divided by the square root of its part's scale estimate,
+with Adam's usual bias corrections, learning rate, and epsilon.
 
-The groups stay fixed throughout fitting, and every matrix entry remains
-trainable. With `dim=1`, this reduces to ordinary scalar Adam. As with Adam
-generally, convergence to a global optimum is not guaranteed.
+For precision, a part's mean square is its squared Frobenius norm divided by
+its number of independent parameters. For `d = dim`, the three counts are
+`1`, `d − 1`, and `d(d − 1)/2`. The Frobenius norm counts both symmetric copies
+of off-diagonal entries.
 
-## When training stops
+This gives smaller gradients their own scale and makes updates independent of
+the basis chosen for the remaining subspace. The basis and groups stay fixed;
+every entry remains trainable. No hyperparameters are added. With `dim=1`, only
+the first part exists and the update is ordinary scalar Adam.
 
-A flat loss curve can hide continuing changes to the model. Stopping therefore
-depends on parameter movement: the combined Frobenius norm of all matrix
-changes over an epoch. Training stops when this is at most `tol` for
-`n_iter_no_change` consecutive epochs, or when `max_iter` is reached.
-Set `tol=0` to use the full epoch budget.
+## Stopping and prediction
 
-`loss_curve_` records the training loss after each epoch. The final iterate is
-retained; the estimator does not create a validation split or select a checkpoint.
+Training stops when the combined Frobenius norm of the matrices' net changes
+over an epoch is at most `tol` for `n_iter_no_change` consecutive epochs, or at
+`max_iter`. Set `tol=0` to run the full epoch budget. `loss_curve_` records the
+training loss; the final iterate is retained.
 
-## Fitting and prediction are separate
-
-The estimator delegates optimization to an internal fitter. Its `model_`
-attribute is a `SpectralModel` containing only the fitted parameters, with no
-optimizer state or training data. You can call it directly to obtain raw
-eigenvalues and inspect its `matrices` property. See the
-[model docstring](../src/spectral_neuron/model.py) for its shape conventions.
+The fitted `model_` contains the parameters needed for prediction, without
+optimizer state. See the [API docstrings](../src/spectral_neuron/estimator.py)
+for parameter details.

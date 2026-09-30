@@ -79,7 +79,7 @@ See `help(SpectralNeuron)` for parameters and fitted attributes, or read the
 ## Understand the model
 
 [How spectral neurons work](docs/explanation.md) explains eigenvalue selection,
-initialization, and training. The [paper repository](https://github.com/alexshtf/spectral_neuron_paper)
-contains the original research and experiments.
+initialization, and training. For the theory and experiments, see Alex Shtoff,
+[*The Spectral Neuron*](https://arxiv.org/abs/2608.08003) (2026).
 
 To run the tests: `uv run pytest`. Distributed under the [BSD 3-Clause license](LICENSE).
