@@ -34,7 +34,6 @@ neuron = SpectralNeuron(
     dim=9,
     loss="log_loss",
     max_iter=1000,
-    tol=0,
     random_state=7,
 )
 neuron.fit(X, y)

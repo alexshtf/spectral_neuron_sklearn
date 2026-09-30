@@ -9,7 +9,8 @@ f(x) = \lambda_k\left(A_0 + \sum_{i=1}^n x_i A_i\right),
 where the learned coefficient matrices are symmetric and `k` selects an
 eigenvalue in ascending order. NumPy handles the spectral computations, SciPy
 provides the sigmoid, and scikit-learn supplies estimator conventions and
-validation. Analytical gradients and Adam updates are implemented internally.
+validation. Analytical gradients and Adam updates with grouped gradient scales
+are implemented internally.
 
 ## Installation
 
@@ -124,6 +125,24 @@ vectorized across each batch. The paper's gapped base-matrix initialization
 and jittered diagonal feature initialization are preserved, using a local
 random generator.
 
+Fitting first expresses all coefficient matrices in an eigenbasis of the
+initial `A_0`, preserving every prediction and eigengap. The selected eigenvector
+then occupies coordinate `k`. Because the initial feature matrices are close to
+multiples of the identity, this direction approximately determines the selected
+eigenvalue across inputs. Its diagonal entries control the nearly affine
+prediction; the off-diagonal entries in its row and column allow that direction
+to mix with the others and develop nonlinear behavior.
+
+Adam keeps ordinary signed-gradient momentum for every packed parameter, but
+shares its squared-gradient scale within three groups per coefficient matrix:
+the selected diagonal entry, its off-diagonal row and column, and the remaining
+submatrix. Each scale is an exponential moving average of the mean squared
+packed gradients in that group. This separates the large gradients of the
+nearly affine prediction from the smaller gradients that develop nonlinearity,
+and makes updates independent of the choice of basis within the remaining
+subspace. The grouping is fixed at initialization; all entries remain trainable.
+For `dim=1`, only the single diagonal group exists and this is ordinary Adam.
+
 By default, `feature_bound="auto"` takes `R` from `max(abs(X))` at fit time,
 after any pipeline preprocessing. For all-zero inputs, it uses `R=1.0`.
 The resolved value is stored in `feature_bound_`; the constructor parameter
@@ -138,11 +157,16 @@ With `"auto"`, the guarantee covers the training inputs and any other inputs
 within that same bound.
 
 `max_iter` counts epochs; each epoch shuffles and visits all samples once.
-`batch_size` caps update and evaluation batches. `learning_rate`, `beta_1`,
-`beta_2`, and `epsilon` control Adam. Training stops after `n_iter_no_change`
-epochs without a training-loss improvement of at least `tol`; use `tol=0` to
-run every epoch. The final iterate is retained. No validation or test data
-are used implicitly.
+`batch_size` caps update and evaluation batches. `learning_rate` controls the
+step size, `beta_1` the signed-gradient momentum, `beta_2` the squared-gradient
+averages, and `epsilon` the denominator offset. Training stops after
+`n_iter_no_change` consecutive epochs whose parameter displacement is at most
+`tol`. Displacement is the Euclidean norm of the packed coefficient change,
+equivalently
+`sqrt(sum(||A_j_after - A_j_before||_F**2))` across all coefficient matrices.
+This is an absolute threshold in parameter units; it detects when the matrices
+have nearly stopped moving. Use `tol=0` to run every epoch. The final iterate
+is retained. No validation or test data are used implicitly.
 
 Inspect `loss_curve_` for the full-data training objective after each epoch,
 and `n_iter_` for the number of completed epochs. Integer `random_state` makes

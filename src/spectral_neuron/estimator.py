@@ -40,14 +40,17 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
     batch_size : int, default=128
         Maximum number of samples per update and evaluation batch.
     tol : float, default=1e-6
-        Minimum training-loss improvement used by the stopping criterion.
+        Maximum absolute parameter displacement per epoch considered small.
+        Measured as the Euclidean norm of all packed coefficient changes,
+        equivalently the combined Frobenius norm of the matrix changes.
     n_iter_no_change : int, default=10
-        Stop after this many epochs without an improvement of at least tol.
+        Stop after this many consecutive epochs with displacement at most tol.
         Set tol=0 to disable this stopping criterion.
     random_state : int or None, default=None
         Seed for a local NumPy generator used by initialization and shuffling.
     beta_1, beta_2 : float, default=0.9, 0.999
-        Adam moment decay rates.
+        Decay rates of per-parameter signed-gradient momentum and per-group
+        mean squared-gradient estimates, respectively.
     epsilon : float, default=1e-8
         Adam denominator offset.
 
@@ -67,6 +70,18 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         Objective used by the most recent fit.
     classes_ : ndarray
         Ordered class labels for a fitted log-loss component.
+
+    Notes
+    -----
+    Fitting uses Adam with three squared-gradient scales per coefficient
+    matrix. In an eigenbasis of the initial A_0, the groups are the selected
+    diagonal entry, its off-diagonal row and column, and the remaining
+    submatrix. Separate scales prevent the dominant gradients of the initially
+    nearly affine prediction from setting the scale for smaller gradients
+    that develop nonlinearity. Each parameter retains its own signed-gradient
+    momentum. The basis and groups stay fixed during fitting; all matrix
+    entries remain trainable. The initial basis change preserves predictions
+    and eigengaps. For dim=1, the update is ordinary scalar Adam.
     """
 
     dim: int = 5

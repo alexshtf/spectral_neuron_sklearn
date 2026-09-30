@@ -106,12 +106,26 @@ def _objective(
 
 @dataclass
 class AdamFitter:
-    """Fit one spectral neuron with shuffled minibatches and internal Adam.
+    """Fit with Adam momentum and three gradient scales per coefficient matrix.
 
-    ``max_iter`` counts epochs. ``tol`` and ``n_iter_no_change`` stop fitting
-    after the full training objective stops improving; ``tol=0`` disables this
-    stopping criterion. The returned model is the final iterate; the fitter
-    does not select or restore checkpoints.
+    The paper's initialization is nearly affine: its selected eigenvectors
+    are close to the selected eigenvector of A0. In coordinates aligned with
+    that direction, the dominant affine gradient occupies one diagonal entry.
+    The entries connecting it to the other coordinates, and the remaining
+    symmetric submatrix, have much smaller gradients that develop nonlinearity.
+
+    Keep Adam's signed first moment for every parameter, but average squared
+    gradients separately over each of those three groups in each matrix.
+    This gives the weaker gradients their own scales without depending on an
+    arbitrary basis in the remaining subspace. The direction and groups stay
+    fixed throughout fitting; all matrix entries remain trainable. There are
+    no additional hyperparameters. A size-one matrix uses ordinary scalar Adam.
+
+    ``max_iter`` counts epochs. ``tol`` bounds the absolute Euclidean norm of
+    the net parameter displacement over an epoch, equivalently the combined
+    Frobenius norm of all matrix displacements. Fitting stops after
+    ``n_iter_no_change`` consecutive displacements at most ``tol``; ``tol=0``
+    disables this criterion. The returned model is the final iterate.
     """
 
     dim: int = 5
@@ -157,19 +171,38 @@ class AdamFitter:
         return eig_idx
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> SpectralModel:
-        """Fit arrays already validated and encoded by the public estimator."""
+        """Fit validated arrays and return the final inference model."""
         eig_idx = self._validate_parameters()
         rng = np.random.default_rng(self.random_state)
         coefficients = _initialize_coefficients(
             X.shape[1], self.dim, eig_idx, rng, self.feature_bound
         )
+        # A single common rotation preserves every initial prediction and
+        # eigengap. It makes the initial selected direction coordinate eig_idx,
+        # so its three gradient parts can be selected without dense projections
+        # on every update. The fitted model stays in these coordinates.
+        _, basis = np.linalg.eigh(_symmetric_matrices(coefficients[0], self.dim))
+        i, j = np.tril_indices(self.dim)
+        coefficients = (
+            basis.T @ _symmetric_matrices(coefficients, self.dim) @ basis
+        )[:, i, j] * np.where(i == j, 1.0, np.sqrt(2.0))
+        group = np.where(
+            (i == eig_idx) & (j == eig_idx), 0,
+            np.where((i == eig_idx) | (j == eig_idx), 1, 2),
+        )
+        # Isometric packing makes each mean square ||G_group||_F**2 / size,
+        # including both symmetric copies of off-diagonal entries. Group sizes
+        # are 1, dim-1, dim*(dim-1)/2; for dim=1 only the first group exists.
+        averaging = np.eye(group.max() + 1)[group]
+        averaging /= averaging.sum(axis=0)
         momentum = np.zeros_like(coefficients)
-        variance = np.zeros_like(coefficients)
+        mean_square = np.zeros((len(coefficients), averaging.shape[1]))
         self.loss_curve_ = []
-        best_loss = np.inf
         no_change = 0
         step = 0
         for _ in range(self.max_iter):
+            if self.tol > 0.0:
+                previous = coefficients.copy()
             order = rng.permutation(len(X))
             for start in range(0, len(X), self.batch_size):
                 batch = order[start : start + self.batch_size]
@@ -179,23 +212,25 @@ class AdamFitter:
                 step += 1
                 momentum *= self.beta_1
                 momentum += (1.0 - self.beta_1) * gradient
-                variance *= self.beta_2
-                variance += (1.0 - self.beta_2) * gradient**2
+                mean_square *= self.beta_2
+                mean_square += (1.0 - self.beta_2) * (gradient**2 @ averaging)
+                rms = np.sqrt(mean_square / (1.0 - self.beta_2**step))[:, group]
                 coefficients -= (
                     self.learning_rate
                     * momentum
                     / (1.0 - self.beta_1**step)
-                    / (np.sqrt(variance / (1.0 - self.beta_2**step)) + self.epsilon)
+                    / (rms + self.epsilon)
                 )
 
             value = _objective(
                 X, y, coefficients, self.dim, eig_idx, self.loss, self.batch_size
             )
             self.loss_curve_.append(value)
-            no_change = 0 if value < best_loss - self.tol else no_change + 1
-            best_loss = min(best_loss, value)
-            if self.tol > 0.0 and no_change >= self.n_iter_no_change:
-                break
+            if self.tol > 0.0:
+                movement = np.linalg.norm(coefficients - previous)
+                no_change = no_change + 1 if movement <= self.tol else 0
+                if no_change >= self.n_iter_no_change:
+                    break
 
         self.n_iter_ = len(self.loss_curve_)
         return SpectralModel(coefficients, self.dim, eig_idx)
