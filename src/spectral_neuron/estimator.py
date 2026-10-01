@@ -62,6 +62,11 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         Number of features seen during fitting.
     feature_bound_ : float
         Resolved feature bound used by the most recent fit.
+    feature_strengths_ : ndarray of shape (n_features_in_,)
+        Spectral norms of the learned feature matrices, excluding the intercept.
+        Each value bounds the change in raw output per unit change in that
+        input feature. For log loss, the raw output is the logit. Values are
+        unnormalized and use the feature units received by the estimator.
     n_iter_ : int
         Number of completed epochs.
     loss_curve_ : list of float
@@ -139,6 +144,13 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         elif hasattr(self, "classes_"):
             del self.classes_
         return self
+
+    @property
+    def feature_strengths_(self) -> NDArray[np.float64]:
+        """Return the spectral norm of each learned feature matrix."""
+        check_is_fitted(self, "model_")
+        eigenvalues = np.linalg.eigvalsh(self.model_.matrices[1:])
+        return np.abs(eigenvalues).max(axis=-1)
 
     def _raw_prediction(self, X):
         check_is_fitted(self, "model_")

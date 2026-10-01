@@ -14,6 +14,21 @@ eigenvalue; choosing the smallest or largest gives a concave or convex function.
 See [*The Spectral Neuron*, §4](https://arxiv.org/html/2608.08003v2#S4) for the theory,
 and the [README](../README.md) for usage.
 
+## Feature strengths
+
+The fitted `SpectralNeuron.feature_strengths_` array has shape
+`(n_features_in_,)` and contains the spectral norms $\|A_i\|_2$ of the learned
+feature matrices, excluding $A_0$. Each value bounds the change in the raw
+eigenvalue output when only that feature changes:
+
+$$
+|f(x + \delta e_i) - f(x)| \leq \|A_i\|_2 |\delta|.
+$$
+
+For `loss="log_loss"`, this is a bound on logits. Strengths are unnormalized
+sensitivity bounds in the input units seen by the neuron; in a preprocessing
+pipeline, they describe the transformed feature coordinates.
+
 ## Initialization
 
 By default, the model starts nearly affine, with its selected eigenvalue

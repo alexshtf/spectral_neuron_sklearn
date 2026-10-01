@@ -2,8 +2,9 @@ import pickle
 
 import numpy as np
 import pytest
+from sklearn.exceptions import NotFittedError
 
-from spectral_neuron import SpectralNeuron
+from spectral_neuron import SpectralModel, SpectralNeuron
 
 
 @pytest.mark.parametrize("loss", ["squared_error", "absolute_error", "log_loss"])
@@ -82,6 +83,47 @@ def test_auto_feature_bound_matches_explicit_bound(X, expected_bound):
     assert automatic.feature_bound_ == explicit.feature_bound_ == expected_bound
     np.testing.assert_array_equal(automatic.model_.coefficients, explicit.model_.coefficients)
     np.testing.assert_array_equal(automatic.loss_curve_, explicit.loss_curve_)
+
+
+@pytest.mark.parametrize("loss", ["squared_error", "log_loss"])
+def test_feature_strengths_are_raw_spectral_norms_of_feature_matrices(loss):
+    matrices = np.array(
+        [
+            [[1000.0, 0.0], [0.0, 1000.0]],
+            [[-5.0, 0.0], [0.0, 2.0]],
+            [[0.0, 3.0], [3.0, 0.0]],
+            [[0.0, 0.0], [0.0, 0.0]],
+        ]
+    )
+    i, j = np.tril_indices(2)
+    coefficients = matrices[:, i, j] * np.where(i == j, 1.0, np.sqrt(2.0))
+    estimator = SpectralNeuron(dim=2, loss=loss, max_iter=1, random_state=7)
+    estimator.fit(np.zeros((4, 3)), np.array([0, 1, 0, 1]))
+    estimator.model_ = SpectralModel(coefficients, dim=2, eig_idx=1)
+    strengths = estimator.feature_strengths_
+    assert strengths.shape == (3,)
+    np.testing.assert_allclose(strengths, [5.0, 3.0, 0.0])
+    np.testing.assert_allclose(
+        strengths, np.linalg.norm(matrices[1:], ord=2, axis=(-2, -1))
+    )
+
+
+def test_feature_strengths_require_fitting_and_refresh_after_refit():
+    estimator = SpectralNeuron(dim=1, max_iter=1, random_state=7)
+    with pytest.raises(NotFittedError):
+        estimator.feature_strengths_
+    X = np.linspace(-1, 1, 6)[:, None]
+    y = X[:, 0]
+    estimator.fit(X, y)
+    assert estimator.feature_strengths_.shape == (1,)
+    np.testing.assert_allclose(
+        estimator.feature_strengths_, np.abs(estimator.model_.coefficients[1:, 0])
+    )
+    estimator.fit(np.column_stack([X[:, 0], X[:, 0] ** 2]), y)
+    assert estimator.feature_strengths_.shape == (2,)
+    np.testing.assert_allclose(
+        estimator.feature_strengths_, np.abs(estimator.model_.coefficients[1:, 0])
+    )
 
 
 def test_component_checks_fit_state_shape_and_logistic_targets():
