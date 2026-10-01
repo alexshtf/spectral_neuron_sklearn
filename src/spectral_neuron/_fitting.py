@@ -133,7 +133,7 @@ class AdamFitter:
     loss: str = "squared_error"
     feature_bound: float = 5.0
     learning_rate: float = 0.01
-    max_iter: int = 200
+    max_iter: int = 500
     batch_size: int = 128
     tol: float = 1e-6
     n_iter_no_change: int = 10

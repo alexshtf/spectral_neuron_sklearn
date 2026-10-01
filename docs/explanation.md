@@ -59,8 +59,8 @@ the first part exists and the update is ordinary scalar Adam.
 
 Training stops when the combined Frobenius norm of the matrices' net changes
 over an epoch is at most `tol` for `n_iter_no_change` consecutive epochs, or at
-`max_iter`. Set `tol=0` to run the full epoch budget. `loss_curve_` records the
-training loss; the final iterate is retained.
+`max_iter` (500 epochs by default). Set `tol=0` to run the full epoch budget.
+`loss_curve_` records the training loss; the final iterate is retained.
 
 The fitted `model_` contains the parameters needed for prediction, without
 optimizer state. See the [API docstrings](../src/spectral_neuron/estimator.py)

@@ -73,6 +73,9 @@ For classification, `predict_proba(X)` returns probabilities and
 `decision_function(X)` returns logits. `transform(X)` always returns the raw
 eigenvalue as a single feature column, including for classification.
 
+By default, `max_iter=500` allows up to 500 epochs. Training can stop sooner
+when parameter changes stay small; see [training and stopping](docs/explanation.md#stopping-and-prediction).
+
 See `help(SpectralNeuron)` for parameters and fitted attributes, or read the
 [estimator docstring](src/spectral_neuron/estimator.py).
 

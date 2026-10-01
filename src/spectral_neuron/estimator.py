@@ -35,7 +35,7 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         each feature's magnitude is at most R.
     learning_rate : float, default=0.01
         Adam step size.
-    max_iter : int, default=200
+    max_iter : int, default=500
         Maximum number of epochs, each visiting every sample once.
     batch_size : int, default=128
         Maximum number of samples per update and evaluation batch.
@@ -89,7 +89,7 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
     loss: str = "squared_error"
     feature_bound: float | str = "auto"
     learning_rate: float = 0.01
-    max_iter: int = 200
+    max_iter: int = 500
     batch_size: int = 128
     tol: float = 1e-6
     n_iter_no_change: int = 10
