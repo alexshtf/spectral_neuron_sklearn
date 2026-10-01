@@ -33,7 +33,7 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         'auto' uses the absolute maximum of the training features, or 1.0 if all
         features are zero. The paper's initial eigengap guarantee applies when
         each feature's magnitude is at most R.
-    learning_rate : float, default=0.01
+    learning_rate : float, default=1e-3
         Adam step size.
     max_iter : int, default=500
         Maximum number of epochs, each visiting every sample once.
@@ -93,7 +93,7 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
     eig_idx: int | None = None
     loss: str = "squared_error"
     feature_bound: float | str = "auto"
-    learning_rate: float = 0.01
+    learning_rate: float = 1e-3
     max_iter: int = 500
     batch_size: int = 128
     tol: float = 1e-6

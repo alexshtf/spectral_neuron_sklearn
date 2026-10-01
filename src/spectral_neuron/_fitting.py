@@ -132,7 +132,7 @@ class AdamFitter:
     eig_idx: int | None = None
     loss: str = "squared_error"
     feature_bound: float = 5.0
-    learning_rate: float = 0.01
+    learning_rate: float = 1e-3
     max_iter: int = 500
     batch_size: int = 128
     tol: float = 1e-6
