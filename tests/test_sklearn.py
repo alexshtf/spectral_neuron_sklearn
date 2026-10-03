@@ -17,7 +17,7 @@ def test_sklearn_clone_pipeline_and_arbitrary_binary_labels(loss):
         else 0.2 + X[:, 0]
     )
     estimator = SpectralNeuron(
-        dim=1, loss=loss, max_iter=400, learning_rate=0.04,
+        dim=1, loss=loss, n_init=2, max_iter=100,
         tol=0, random_state=6,
     )
     copied = clone(estimator)

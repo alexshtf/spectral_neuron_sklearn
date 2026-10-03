@@ -5,23 +5,22 @@ import pytest
 from scipy.special import expit
 from sklearn.exceptions import NotFittedError
 
-from spectral_neuron import ConvexLBFGS2Fitter, SpectralModel, SpectralNeuron
+from spectral_neuron import LBFGSFitter, SpectralModel, SpectralNeuron
 
 
 @pytest.mark.parametrize("loss", ["squared_error", "absolute_error", "log_loss"])
-def test_adam_fits_linear_regression_and_binary_classification(loss):
+def test_linear_regression_and_binary_classification(loss):
     X = np.linspace(-1.0, 1.0, 81)[:, None]
     y = (X[:, 0] > 0.1).astype(int) if loss == "log_loss" else 0.6 + 1.25 * X[:, 0]
     estimator = SpectralNeuron(
-        dim=1, loss=loss, fitter="convex_adam", learning_rate=0.025, max_iter=600,
-        batch_size=128, tol=0, random_state=3,
+        dim=1, loss=loss, n_init=2, max_iter=100, random_state=3,
     )
     transformed = estimator.fit_transform(X, y)
     assert transformed.shape == (len(X), 1)
     np.testing.assert_array_equal(transformed, estimator.transform(X))
     assert estimator.predict(X).shape == (len(X),)
     assert estimator.n_features_in_ == 1
-    assert 0 < estimator.n_iter_ <= estimator.max_iter
+    assert 0 <= estimator.n_iter_ <= estimator.max_iter
     assert np.isfinite(estimator.loss_curve_).all()
 
     if loss == "log_loss":
@@ -45,7 +44,7 @@ def test_dense_neuron_fits_nonlinear_function():
     X = np.linspace(-1, 1, 81)[:, None]
     y = np.sqrt(X[:, 0] ** 2 + 0.3**2)
     estimator = SpectralNeuron(
-        dim=3, eig_idx=2, n_init=10, learning_rate=0.025, max_iter=600,
+        dim=3, eig_idx=2, n_init=10, max_iter=300,
         tol=0, random_state=7,
     ).fit(X, y)
     assert np.mean((estimator.predict(X) - y) ** 2) < 5e-4
@@ -56,7 +55,7 @@ def test_fitting_is_reproducible_and_pickle_preserves_predictions():
     rng = np.random.default_rng(4)
     X = rng.normal(size=(37, 2))
     y = X[:, 0] - 0.3 * X[:, 1]
-    options = dict(dim=2, max_iter=40, batch_size=9, random_state=7)
+    options = dict(dim=2, n_init=3, max_iter=40, random_state=7)
     before = np.random.get_state()
     first = SpectralNeuron(**options).fit(X, y)
     after = np.random.get_state()
@@ -68,31 +67,13 @@ def test_fitting_is_reproducible_and_pickle_preserves_predictions():
     np.testing.assert_array_equal(restored.predict(X), first.predict(X))
 
 
-@pytest.mark.parametrize(
-    "X, expected_bound",
-    [
-        (np.array([[-12.0, 2.0], [3.0, -6.0], [1.0, 4.0]]), 12.0),
-        (np.zeros((4, 2)), 1.0),
-    ],
-)
-def test_auto_feature_bound_matches_explicit_bound(X, expected_bound):
-    y = np.linspace(-1, 1, len(X))
-    options = dict(dim=3, fitter="grouped_adam", max_iter=4, tol=0, random_state=7)
-    automatic = SpectralNeuron(**options).fit(X, y)
-    explicit = SpectralNeuron(**options, feature_bound=expected_bound).fit(X, y)
-    assert automatic.feature_bound == "auto"
-    assert automatic.feature_bound_ == explicit.feature_bound_ == expected_bound
-    np.testing.assert_array_equal(automatic.model_.coefficients, explicit.model_.coefficients)
-    np.testing.assert_array_equal(automatic.loss_curve_, explicit.loss_curve_)
-
-
 @pytest.mark.parametrize("loss", ["squared_error", "absolute_error", "log_loss"])
-def test_default_fitter_matches_direct_fit_and_refit_clears_its_diagnostics(loss):
+def test_estimator_matches_direct_fitter_and_diagnostics(loss):
     rng = np.random.default_rng(6)
     X = rng.uniform(-1, 1, size=(23, 2))
     y = rng.binomial(1, 0.5, len(X)) if loss == "log_loss" else X[:, 0] ** 2 - X[:, 1]
     options = dict(dim=3, loss=loss, n_init=3, max_iter=4, tol=0, random_state=5)
-    direct = ConvexLBFGS2Fitter(**options)
+    direct = LBFGSFitter(**options)
     model = direct.fit(X, y)
     estimator = SpectralNeuron(**options).fit(X, y)
     np.testing.assert_array_equal(estimator.model_.coefficients, model.coefficients)
@@ -102,10 +83,6 @@ def test_default_fitter_matches_direct_fit_and_refit_clears_its_diagnostics(loss
     )
     for name in (*diagnostics, "loss_curve_", "n_iter_"):
         np.testing.assert_equal(getattr(estimator, name), getattr(direct, name))
-    estimator.set_params(fitter="convex_adam").fit(X, y)
-    assert all(not hasattr(estimator, name) for name in diagnostics[3:])
-    estimator.set_params(fitter="grouped_adam").fit(X, y)
-    assert all(not hasattr(estimator, name) for name in diagnostics)
 
 
 @pytest.mark.parametrize("loss", ["squared_error", "log_loss"])

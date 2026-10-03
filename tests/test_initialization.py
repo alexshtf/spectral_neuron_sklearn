@@ -3,10 +3,8 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-import spectral_neuron.fitting as fitting
 import spectral_neuron._initialization as initialization
-from spectral_neuron import ConvexAdamFitter, SpectralModel
-from spectral_neuron._fitting import loss_and_gradient, parameter_gradient
+from spectral_neuron import SpectralModel
 from spectral_neuron._initialization import _fit_linear, _sample_shapes, initialize
 
 
@@ -91,84 +89,3 @@ def test_size_one_initialization_is_an_affine_fit():
     np.testing.assert_allclose(coefficients, [[2.0], [-0.7]], atol=1e-12)
     assert max(losses) < 1e-24
 
-
-def test_adam_matches_independent_per_parameter_moment_updates(monkeypatch):
-    rng = np.random.default_rng(12)
-    X = rng.normal(size=(9, 2))
-    y = rng.normal(size=len(X))
-    initial = rng.normal(size=(3, 6))
-    initial_loss = loss_and_gradient(SpectralModel(initial, 3, 1)(X), y, "squared_error")[0]
-    monkeypatch.setattr(
-        fitting, "initialize", lambda *args: (initial.copy(), [initial_loss])
-    )
-    fitter = ConvexAdamFitter(
-        dim=3, max_iter=3, batch_size=len(X), learning_rate=0.04,
-        beta_1=0.6, beta_2=0.8, epsilon=0.03, tol=0, random_state=5,
-    )
-
-    model = fitter.fit(X, y)
-
-    coefficients = initial.copy()
-    first = np.zeros_like(coefficients)
-    second = np.zeros_like(coefficients)
-    for step in range(1, 4):
-        _, gradient = parameter_gradient(X, y, coefficients, 3, 1, "squared_error")
-        first = 0.6 * first + 0.4 * gradient
-        second = 0.8 * second + 0.2 * gradient**2
-        first_hat = first / (1 - 0.6**step)
-        second_hat = second / (1 - 0.8**step)
-        # MLPRegressor adds epsilon before bias correction of the second
-        # moment, so its equivalent corrected denominator rescales epsilon.
-        denominator = np.sqrt(second_hat) + 0.03 / np.sqrt(1 - 0.8**step)
-        coefficients -= 0.04 * first_hat / denominator
-
-    np.testing.assert_allclose(model.coefficients, coefficients, rtol=1e-12, atol=1e-12)
-
-
-def test_loss_plateau_stops_moving_parameters_unless_tolerance_is_zero(monkeypatch):
-    X, y = np.zeros((1, 1)), np.array([0.05])
-    monkeypatch.setattr(
-        fitting, "initialize", lambda *args: (np.zeros((2, 1)), [0.05**2])
-    )
-    options = dict(
-        dim=1, max_iter=12, learning_rate=0.1, beta_1=0, beta_2=0,
-        epsilon=1e-30, n_iter_no_change=2, random_state=4,
-    )
-    stopping = ConvexAdamFitter(**options, tol=1e-6)
-    fixed_epochs = ConvexAdamFitter(**options, tol=0)
-
-    stopping.fit(X, y)
-    fixed_epochs.fit(X, y)
-
-    # Parameters alternate between intercepts 0 and 0.1, while loss is
-    # constant. This is loss-based patience, not parameter-motion stopping.
-    np.testing.assert_allclose(stopping.loss_curve_, 0.05**2, atol=1e-17)
-    assert stopping.n_iter_ == 2
-    assert stopping.converged_
-    assert fixed_epochs.n_iter_ == 12
-    assert not fixed_epochs.converged_
-
-
-@pytest.mark.parametrize("loss", ["squared_error", "absolute_error", "log_loss"])
-def test_convex_adam_end_to_end_is_reproducible_and_reports_actual_losses(loss):
-    rng = np.random.default_rng(13)
-    X = rng.uniform(-1, 1, size=(43, 2))
-    y = (
-        rng.binomial(1, 0.5 + 0.3 * X[:, 0] * X[:, 1])
-        if loss == "log_loss"
-        else X[:, 0] ** 2 - 0.5 * X[:, 1]
-    )
-    options = dict(dim=3, loss=loss, n_init=3, max_iter=4, batch_size=17, tol=0, random_state=8)
-    first, second = ConvexAdamFitter(**options), ConvexAdamFitter(**options)
-
-    model = first.fit(X, y)
-    repeated = second.fit(X, y)
-
-    np.testing.assert_array_equal(model.coefficients, repeated.coefficients)
-    np.testing.assert_array_equal(first.loss_curve_, second.loss_curve_)
-    assert first.initial_loss_ == pytest.approx(min(first.initialization_losses_))
-    assert first.n_iter_ == 4
-    assert len(first.loss_curve_) == first.n_iter_
-    actual_loss = loss_and_gradient(model(X), y, loss)[0]
-    assert first.loss_curve_[-1] == pytest.approx(actual_loss)
-    assert np.isfinite(actual_loss)

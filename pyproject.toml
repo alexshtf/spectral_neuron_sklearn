@@ -1,7 +1,7 @@
 [project]
 name = "spectral-neuron-component"
 version = "0.1.0"
-description = "Scikit-learn spectral neurons with analytical gradients and NumPy fitters."
+description = "Scikit-learn spectral neurons with analytical gradients and L-BFGS fitting."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "BSD-3-Clause"

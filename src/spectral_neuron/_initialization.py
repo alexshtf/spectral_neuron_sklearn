@@ -1,14 +1,12 @@
 """Fit affine coefficients and amplitude for random spectral shapes."""
 
-from collections.abc import Iterator
-
 import numpy as np
 from scipy.linalg import lstsq
 from scipy.optimize import linprog
 from sklearn.linear_model import LogisticRegression
 from sklearn.utils.validation import assert_all_finite
 
-from ._fitting import loss_and_gradient
+from ._loss import loss_and_gradient
 from .model import _symmetric_matrices
 
 
@@ -55,7 +53,7 @@ def _fit_linear(design: np.ndarray, y: np.ndarray, loss: str) -> np.ndarray:
             raise ValueError(f"Unknown loss: {loss!r}")
 
 
-def initializations(
+def initialize(
     X: np.ndarray,
     y: np.ndarray,
     dim: int,
@@ -63,8 +61,8 @@ def initializations(
     loss: str,
     n_init: int,
     rng: np.random.Generator,
-) -> Iterator[tuple[np.ndarray, float]]:
-    """Yield each convex candidate as packed matrices and its training loss.
+) -> tuple[np.ndarray, list[float]]:
+    """Return the best convex candidate and every candidate's training loss.
 
     For the odd-dimensional middle eigenvalue, signed amplitudes can be
     absorbed into the shapes. Otherwise, test both orientations of each draw
@@ -76,8 +74,7 @@ def initializations(
     if dim == 1:
         linear = _fit_linear(affine_design, y, loss)
         value, _ = loss_and_gradient(affine_design @ linear, y, loss)
-        yield linear[:, None], value
-        return
+        return linear[:, None], [value]
 
     i, j = np.tril_indices(dim)
     identity = (i == j).astype(float)
@@ -85,6 +82,8 @@ def initializations(
     orientations = 1 if middle else 2
     design = np.column_stack((affine_design, np.zeros(len(X))))
     affine_fit = None
+    candidate_losses = []
+    best_loss = np.inf
     for start in range(0, n_init, orientations):
         shapes = _sample_shapes(X.shape[1], dim, rng)
         eigenvalues = np.linalg.eigvalsh(
@@ -101,25 +100,8 @@ def initializations(
                 linear = np.r_[affine_fit, 0.0]
             value, _ = loss_and_gradient(design @ linear, y, loss)
             assert_all_finite(value)
-            coefficients = linear[:-1, None] * identity + linear[-1] * sign * shapes
-            yield coefficients, value
-
-
-def initialize(
-    X: np.ndarray,
-    y: np.ndarray,
-    dim: int,
-    eig_idx: int,
-    loss: str,
-    n_init: int,
-    rng: np.random.Generator,
-) -> tuple[np.ndarray, list[float]]:
-    """Return the best convex candidate, together with all candidate losses."""
-    candidate_losses = []
-    best_loss = np.inf
-    for candidate, value in initializations(X, y, dim, eig_idx, loss, n_init, rng):
-        candidate_losses.append(value)
-        if value < best_loss:
-            best_loss = value
-            coefficients = candidate
+            candidate_losses.append(value)
+            if value < best_loss:
+                best_loss = value
+                coefficients = linear[:-1, None] * identity + linear[-1] * sign * shapes
     return coefficients, candidate_losses

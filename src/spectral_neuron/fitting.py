@@ -1,215 +1,179 @@
-"""Convex random-shape initialization followed by ordinary minibatch Adam."""
+"""Convex initialization and full-batch L-BFGS in whitened coordinates."""
 
-from collections.abc import Iterator
+from collections import deque
 from dataclasses import dataclass
 from numbers import Integral, Real
 import warnings
 
 import numpy as np
+from scipy.optimize import OptimizeResult
 from sklearn.exceptions import ConvergenceWarning
-from sklearn.utils import gen_batches
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import assert_all_finite, check_scalar, check_X_y
 
-from ._fitting import LOSSES, _objective, parameter_gradient
-from ._initialization import initializations, initialize
-from .model import SpectralModel, _resolve_eig_idx
+from ._loss import LOSSES, loss_and_gradient
+from ._initialization import initialize
+from .model import SpectralModel, _resolve_eig_idx, _symmetric_matrices
 
 
-class _AdamFitter:
-    """Shared validation and per-candidate Adam updates."""
+def _weak_wolfe_lbfgs(fun, x, max_iter, tol, callback):
+    """Identity-base L-BFGS with Lewis–Overton's doubling/bisection search."""
+    pairs = deque(maxlen=20)
+    value, gradient = fun(x)
+    evaluations = 1
+    message = "Iteration budget exhausted."
+    for iteration in range(max_iter + 1):
+        if max_iter and np.linalg.norm(gradient, np.inf) <= tol:
+            message = "Numerical gradient tolerance reached."
+            break
+        if iteration == max_iter:
+            break
+        direction = gradient.copy()
+        weights = []
+        for s, y, rho in reversed(pairs):
+            weights.append(rho * (s @ direction))
+            direction -= weights[-1] * y
+        for (s, y, rho), weight in zip(pairs, reversed(weights)):
+            direction += s * (weight - rho * (y @ direction))
+        direction = -direction
+        slope = gradient @ direction
+        if not slope < 0:
+            message = "No descent direction."
+            break
+        lower, upper, step = 0.0, np.inf, 1.0
+        for _ in range(60):
+            trial = x + step * direction
+            trial_value, trial_gradient = fun(trial)
+            evaluations += 1
+            if not trial_value < value + 1e-4 * step * slope:
+                upper = step
+            elif not trial_gradient @ direction > 0.9 * slope:
+                lower = step
+            else:
+                break
+            step = (lower + upper) / 2 if np.isfinite(upper) else 2 * lower
+        else:
+            message = "Weak-Wolfe line search failed."
+            break
+        s, y = trial - x, trial_gradient - gradient
+        curvature = s @ y
+        if not curvature > 0:
+            message = "Nonpositive curvature."
+            break
+        pairs.append((s, y, 1 / curvature))
+        x, value, gradient = trial, trial_value, trial_gradient
+        callback(x)
+    return OptimizeResult(
+        x=x, fun=value, jac=gradient, nit=iteration, nfev=evaluations,
+        success=message == "Numerical gradient tolerance reached.", message=message,
+    )
 
-    def _prepare(self, X, y):
+
+@dataclass
+class LBFGSFitter:
+    """Convex initialization and exact-loss, full-batch L-BFGS.
+
+    Standardize inputs and regression targets, select the best of ``n_init``
+    convex fits of random spectral features, then whiten the augmented design.
+    Refine every matrix entry with analytic spectral derivatives, an identity
+    base metric, 20 curvature pairs, and a weak-Wolfe doubling/bisection search.
+    Squared, absolute, and logistic losses are optimized without smoothing.
+
+    ``max_iter`` counts accepted steps; zero returns the initialization.
+    ``tol`` bounds the gradient infinity norm in optimization coordinates;
+    zero disables a positive threshold. This is a numerical stopping rule,
+    not a nonsmooth stationarity certificate. At eigenvalue ties, use the
+    eigenvector returned by eigh; at zero absolute residuals, use sign(0)=0.
+
+    ``fit`` returns a SpectralModel in original units. Direct log-loss fitting
+    requires both classes encoded as 0 and 1; the model returns logits.
+    Rank-deficient designs use the minimum-norm extension in standardized
+    coordinates. Initialization and refinement use training data only.
+
+    ``initialization_losses_``, ``initial_loss_``, ``loss_curve_`` and ``loss_``
+    report training losses in original units. ``n_iter_``, ``n_evaluations_``,
+    ``gradient_norm_``, ``converged_`` and ``message_`` describe termination.
+    The last accepted iterate is returned; unsuccessful optimization with a
+    positive iteration budget raises ConvergenceWarning.
+    """
+
+    dim: int = 5
+    eig_idx: int | None = None
+    loss: str = "squared_error"
+    n_init: int = 50
+    max_iter: int = 300
+    tol: float = 1e-5
+    random_state: int | None = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> SpectralModel:
+        """Fit dense numeric arrays and return an inference-only model."""
         eig_idx = _resolve_eig_idx(self.dim, self.eig_idx)
         if self.loss not in LOSSES:
             raise ValueError(f"loss must be one of {LOSSES}; got {self.loss!r}")
         check_scalar(self.n_init, "n_init", Integral, min_val=1)
-        if self.batch_size != "auto":
-            check_scalar(self.batch_size, "batch_size", Integral, min_val=1)
-        for name, upper, boundaries in (
-            ("learning_rate", np.inf, "neither"),
-            ("epsilon", np.inf, "neither"),
-            ("beta_1", 1, "left"),
-            ("beta_2", 1, "left"),
-        ):
-            check_scalar(
-                getattr(self, name), name, Real,
-                min_val=0, max_val=upper, include_boundaries=boundaries,
-            )
-        assert_all_finite([self.learning_rate, self.epsilon, self.beta_1, self.beta_2])
+        check_scalar(self.max_iter, "max_iter", Integral, min_val=0)
+        check_scalar(self.tol, "tol", Real, min_val=0)
+        assert_all_finite(self.tol)
         if self.random_state is not None:
             check_scalar(self.random_state, "random_state", Integral, min_val=0)
         X, y = check_X_y(X, y, dtype=np.float64, y_numeric=True)
         if self.loss == "log_loss" and not np.array_equal(np.unique(y), [0, 1]):
             raise ValueError("log_loss requires both binary targets 0 and 1")
-        batch_size = min(200 if self.batch_size == "auto" else self.batch_size, len(X))
-        return X, y, eig_idx, batch_size
 
-    def _adam_epochs(
-        self, X, y, coefficients, eig_idx, batch_size, rng, n_iter
-    ) -> Iterator[float]:
-        """Update coefficients in place and yield each epoch's full training loss."""
-        momentum = np.zeros_like(coefficients)
-        mean_square = np.zeros_like(coefficients)
-        step = 0
-        for _ in range(n_iter):
-            order = rng.permutation(len(X))
-            for batch_slice in gen_batches(len(X), batch_size):
-                batch = order[batch_slice]
-                _, gradient = parameter_gradient(
-                    X[batch], y[batch], coefficients, self.dim, eig_idx, self.loss
-                )
-                step += 1
-                momentum *= self.beta_1
-                momentum += (1.0 - self.beta_1) * gradient
-                mean_square *= self.beta_2
-                mean_square += (1.0 - self.beta_2) * gradient**2
-                rate = (
-                    self.learning_rate * np.sqrt(1.0 - self.beta_2**step)
-                    / (1.0 - self.beta_1**step)
-                )
-                coefficients -= rate * momentum / (np.sqrt(mean_square) + self.epsilon)
-
-            value = _objective(
-                X, y, coefficients, self.dim, eig_idx, self.loss, batch_size
-            )
-            assert_all_finite(value)
-            yield value
-
-
-@dataclass
-class ConvexAdamFitter(_AdamFitter):
-    """Convex random-shape initialization followed by ordinary Adam.
-
-    ``n_init`` counts convex candidate fits; opposite orientations count
-    separately for noncentral eigenvalues. A required affine fallback is
-    fitted once in addition to that budget. ``dim=1`` uses only an affine fit.
-    Adam then refines the selected matrices with per-parameter moments.
-
-    ``max_iter`` counts epochs; ``batch_size="auto"`` uses min(200, n_samples).
-    Stop after ``n_iter_no_change`` epochs without an absolute improvement of
-    at least ``tol`` over the best full training loss, including initialization.
-    ``tol=0`` disables stopping. Adam's epsilon convention matches MLPRegressor.
-    ``random_state`` seeds a local generator for initialization and shuffling.
-
-    ``fit`` returns the final SpectralModel. Log loss requires both classes
-    encoded as 0 and 1 and produces logits. Scale inputs and regression targets
-    before fitting. All fitting and stopping decisions use training data.
-
-    Diagnostics: ``initialization_losses_`` (one per candidate), ``initial_loss_``,
-    ``loss_curve_`` (one per Adam epoch), ``n_iter_``, and ``converged_``. The last
-    indicates loss-based stopping, not a certified optimum; exhausted budgets
-    raise ConvergenceWarning unless ``tol=0``.
-    """
-
-    dim: int = 5
-    eig_idx: int | None = None
-    loss: str = "squared_error"
-    n_init: int = 50
-    learning_rate: float = 1e-3
-    max_iter: int = 200
-    batch_size: int | str = "auto"
-    tol: float = 1e-4
-    n_iter_no_change: int = 10
-    random_state: int | None = None
-    beta_1: float = 0.9
-    beta_2: float = 0.999
-    epsilon: float = 1e-8
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> SpectralModel:
-        """Fit numeric arrays and return the final spectral model."""
-        for name in ("max_iter", "n_iter_no_change"):
-            check_scalar(getattr(self, name), name, Integral, min_val=1)
-        check_scalar(self.tol, "tol", Real, min_val=0)
-        assert_all_finite(self.tol)
-        X, y, eig_idx, batch_size = self._prepare(X, y)
-        rng = np.random.default_rng(self.random_state)
-        coefficients, self.initialization_losses_ = initialize(
-            X, y, self.dim, eig_idx, self.loss, self.n_init, rng
+        scaler = StandardScaler()
+        X = scaler.fit_transform(X)
+        target_mean, target_scale = 0.0, 1.0
+        if self.loss != "log_loss":
+            target_mean, target_scale = float(y.mean()), float(y.std()) or 1.0
+        y = (y - target_mean) / target_scale
+        loss_scale = target_scale**2 if self.loss == "squared_error" else target_scale
+        coefficients, losses = initialize(
+            X, y, self.dim, eig_idx, self.loss, self.n_init,
+            np.random.default_rng(self.random_state),
         )
-        self.initial_loss_ = _objective(
-            X, y, coefficients, self.dim, eig_idx, self.loss, batch_size
-        )
-        assert_all_finite(self.initial_loss_)
-        best_loss = self.initial_loss_
+        self.initialization_losses_ = [value * loss_scale for value in losses]
+
+        design = np.column_stack((np.ones(len(X)), X))
+        u, singular, vt = np.linalg.svd(design, full_matrices=False)
+        keep = singular > singular[0] * max(design.shape) * np.finfo(float).eps
+        # design @ transform = Z, with Z.T @ Z / n = I on the observed span.
+        Z = u[:, keep] * np.sqrt(len(X))
+        transform = vt[keep].T * (np.sqrt(len(X)) / singular[keep])
+        initial = (singular[keep, None] * (vt[keep] @ coefficients)) / np.sqrt(len(X))
+        i, j = np.tril_indices(self.dim)
+        factors = np.where(i == j, 1.0, np.sqrt(2.0))
         self.loss_curve_ = []
-        self.converged_ = False
-        no_improvement = 0
-        for value in self._adam_epochs(
-            X, y, coefficients, eig_idx, batch_size, rng, self.max_iter
-        ):
-            self.loss_curve_.append(value)
-            if self.tol > 0.0:
-                no_improvement = no_improvement + 1 if value > best_loss - self.tol else 0
-                best_loss = min(best_loss, value)
-                if no_improvement >= self.n_iter_no_change:
-                    self.converged_ = True
-                    break
+        current_loss = 0.0
 
-        self.n_iter_ = len(self.loss_curve_)
-        if self.tol > 0.0 and not self.converged_:
-            warnings.warn(
-                "Adam reached max_iter before the loss-based stopping criterion.",
-                ConvergenceWarning,
-                stacklevel=2,
-            )
+        def objective(flat):
+            nonlocal current_loss
+            matrices = _symmetric_matrices(Z @ flat.reshape(initial.shape), self.dim)
+            values, vectors = np.linalg.eigh(matrices)
+            prediction = values[:, eig_idx]
+            value, derivative = loss_and_gradient(prediction, y, self.loss)
+            current_loss = value * loss_scale
+            v = vectors[:, :, eig_idx]
+            sensitivity = v[:, i] * v[:, j] * factors
+            gradient = Z.T @ (derivative[:, None] * sensitivity)
+            return value, gradient.ravel()
+
+        objective(initial.ravel())
+        self.initial_loss_ = current_loss
+        result = _weak_wolfe_lbfgs(
+            objective, initial.ravel(), self.max_iter, self.tol,
+            lambda _: self.loss_curve_.append(current_loss),
+        )
+        objective(result.x)
+        self.loss_ = current_loss
+        self.n_iter_, self.n_evaluations_ = int(result.nit), int(result.nfev)
+        self.converged_, self.message_ = bool(result.success), str(result.message)
+        self.gradient_norm_ = float(np.max(np.abs(result.jac)))
+
+        coefficients = transform @ result.x.reshape(initial.shape)
+        coefficients[1:] /= scaler.scale_[:, None]
+        coefficients[0] -= scaler.mean_ @ coefficients[1:]
+        coefficients *= target_scale
+        coefficients[0, i == j] += target_mean
+        if self.max_iter and not self.converged_:
+            warnings.warn(f"L-BFGS stopped: {self.message_}", ConvergenceWarning, stacklevel=2)
         return SpectralModel(coefficients, self.dim, eig_idx)
-
-
-@dataclass
-class ConvexAdam2Fitter(_AdamFitter):
-    """Refine every convex initialization, then select the best final model.
-
-    Uses the same candidate construction and ``n_init`` budget as
-    ConvexAdamFitter. Each candidate receives exactly ``n_iter`` full epochs
-    of ordinary Adam with fresh moments. There is no tolerance, patience, or
-    checkpoint selection. The smallest final full training loss wins.
-    ``dim=1`` has just one affine initialization.
-
-    Defaults: 50 candidates, 50 epochs each, learning rate 1e-2, and batches
-    of min(200, n_samples). Initialization and shuffling use separate local
-    random streams, so changing ``n_iter`` does not change the sampled shapes.
-    Log loss requires both classes encoded as 0 and 1 and returns logits.
-    Scale inputs and regression targets before fitting.
-
-    Diagnostics: ``initialization_losses_`` and ``final_losses_`` in candidate
-    order, ``best_init_`` (zero-based index), and the winner's ``initial_loss_``
-    and ``loss_curve_``. ``n_iter_`` is the number of epochs per candidate.
-    """
-
-    dim: int = 5
-    eig_idx: int | None = None
-    loss: str = "squared_error"
-    n_init: int = 50
-    learning_rate: float = 1e-2
-    n_iter: int = 50
-    batch_size: int | str = "auto"
-    random_state: int | None = None
-    beta_1: float = 0.9
-    beta_2: float = 0.999
-    epsilon: float = 1e-8
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> SpectralModel:
-        """Run every candidate for the fixed budget; return the best final model."""
-        check_scalar(self.n_iter, "n_iter", Integral, min_val=1)
-        X, y, eig_idx, batch_size = self._prepare(X, y)
-        rng = np.random.default_rng(self.random_state)
-        adam_rng = rng.spawn(1)[0]
-        self.initialization_losses_ = []
-        self.final_losses_ = []
-        best_loss = np.inf
-        for index, (coefficients, initial_loss) in enumerate(initializations(
-            X, y, self.dim, eig_idx, self.loss, self.n_init, rng
-        )):
-            self.initialization_losses_.append(initial_loss)
-            curve = list(self._adam_epochs(
-                X, y, coefficients, eig_idx, batch_size, adam_rng, self.n_iter
-            ))
-            self.final_losses_.append(curve[-1])
-            if curve[-1] < best_loss:
-                best_loss = curve[-1]
-                self.best_init_ = index
-                self.initial_loss_ = initial_loss
-                self.loss_curve_ = curve
-                best_coefficients = coefficients
-        self.n_iter_ = self.n_iter
-        return SpectralModel(best_coefficients, self.dim, eig_idx)
