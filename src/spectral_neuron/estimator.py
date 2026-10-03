@@ -12,7 +12,7 @@ from sklearn.utils.metaestimators import available_if
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import check_is_fitted, validate_data
 
-from spectral_neuron.fitting import LBFGSFitter
+from spectral_neuron.fitting import ProximalBundleFitter
 
 
 @dataclass(kw_only=True, eq=False, repr=False)
@@ -26,17 +26,22 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
     eig_idx : int or None, default=None
         Zero-based eigenvalue index in ascending order; None selects dim // 2.
     loss : {'squared_error', 'absolute_error', 'log_loss'}
-        Mean training objective. Log loss accepts any two class labels.
+        Exact mean data loss. Log loss accepts any two class labels.
+    alpha : float, default=0
+        Penalty on the sum of feature matrix operator norms in standardized
+        input/target coordinates. The bias is unpenalized. Positive values
+        can remove entire feature matrices exactly.
     n_init : int, default=50
-        Convex fits of random spectral features, counting opposite orientations
-        separately. The lowest training-loss candidate initializes L-BFGS.
-        An affine fallback is fitted once as needed; dim=1 uses only that fit.
+        Convex affine calibrations of fixed-norm nonlinear candidates. The
+        lowest penalized objective initializes refinement. An affine baseline
+        is fitted separately and compared at the end; for dim=1, initialization
+        uses only that affine fit.
     max_iter : int, default=300
-        Maximum accepted L-BFGS steps. Zero returns the initialization.
-    tol : float, default=1e-5
-        Gradient infinity-norm threshold in normalized optimization coordinates;
-        zero disables a positive threshold. This is a numerical stopping rule,
-        not a general nonsmooth stationarity certificate.
+        Maximum trial steps, including rejected trials. Zero returns the better
+        of the nonlinear initialization and the affine baseline.
+    tol : float, default=1e-6
+        Relative bundle-model decrease tolerance; zero disables a positive
+        threshold. This is not a nonsmooth stationarity certificate.
     random_state : int or None, default=None
         Seed for the local initialization generator.
 
@@ -46,16 +51,26 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         Fitted inference-only model in original input and target units.
     n_features_in_ : int
         Number of input features seen during fitting.
-    initialization_losses_, initial_loss_ : list of float, float
-        Candidate training losses and the selected initialization's loss.
-    loss_curve_ : list of float
-        Training loss after each accepted step, in original target units.
-    n_iter_, n_evaluations_ : int
-        Accepted steps and optimizer evaluations, excluding initialization and
-        diagnostic evaluations.
-    converged_, message_, gradient_norm_ : bool, str, float
-        Whether the numerical gradient threshold was reached, the termination
-        reason, and the final gradient infinity norm in optimization coordinates.
+    initialization_objectives_ : list of float
+        Candidate penalized objectives in standardized coordinates.
+    initial_loss_, initial_objective_ : float
+        Nonlinear refinement's initial data loss in original units and its
+        penalized objective in standardized coordinates.
+    loss_curve_, objective_curve_ : list of float
+        Accepted nonlinear steps: original-unit data losses and standardized
+        penalized objectives. Data loss need not decrease when alpha is positive.
+    objective_ : float
+        Returned model's standardized penalized training objective.
+    used_affine_ : bool
+        Whether the final affine baseline had a lower objective than refinement.
+    n_iter_, n_accepted_, n_evaluations_ : int
+        Trials, accepted steps, and optimizer loss/gradient evaluations. The
+        latter excludes initialization and diagnostics and equals n_iter_ + 1.
+    converged_, message_ : bool, str
+        Whether the model-decrease tolerance was reached and why fitting stopped.
+    model_decrease_, duality_gap_ : float or None
+        Last model's optimal decrease upper bound and primal-dual gap; None
+        when max_iter=0. These are model diagnostics, not spectral certificates.
     feature_strengths_ : ndarray of shape (n_features_in_,)
         Spectral norms of the feature matrices. Each bounds raw output changes
         per unit change in that input feature, in the original units.
@@ -66,19 +81,20 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
 
     Notes
     -----
-    Fitting standardizes inputs and regression targets, whitens the augmented
-    design, and refines the best convex initialization with full-batch L-BFGS.
-    All losses are exact. Both stages use training data only; the last accepted
-    iterate is retained. Budget exhaustion or solver failure with a positive
-    iteration budget raises ConvergenceWarning. See LBFGSFitter for details.
+    Fitting standardizes inputs and regression targets, then uses a full-batch
+    proximal bundle with two BFGS curvature pairs and an exact spectral-norm
+    prox. All stages use training data only. Budget exhaustion or solver failure
+    with a positive iteration budget raises ConvergenceWarning. See
+    ProximalBundleFitter for details.
     """
 
     dim: int = 5
     eig_idx: int | None = None
     loss: str = "squared_error"
+    alpha: float = 0.0
     n_init: int = 50
     max_iter: int = 300
-    tol: float = 1e-5
+    tol: float = 1e-6
     random_state: int | None = None
 
     def __sklearn_tags__(self):
@@ -105,11 +121,13 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
                     "Only binary classification is supported. "
                     f"Got {len(classes)} class(es)."
                 )
-        fitter = LBFGSFitter(**self.get_params(deep=False))
+        fitter = ProximalBundleFitter(**self.get_params(deep=False))
         self.model_ = fitter.fit(X, y.astype(np.float64, copy=False))
         for name in (
-            "initialization_losses_", "initial_loss_", "loss_curve_", "n_iter_",
-            "converged_", "message_", "n_evaluations_", "gradient_norm_",
+            "initialization_objectives_", "initial_loss_", "initial_objective_",
+            "loss_curve_", "objective_curve_", "objective_", "used_affine_",
+            "n_iter_", "n_accepted_", "n_evaluations_", "converged_", "message_",
+            "model_decrease_", "duality_gap_",
         ):
             setattr(self, name, getattr(fitter, name))
         self._n_features_out = 1

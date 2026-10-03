@@ -31,9 +31,8 @@ plt.show()
 
 # %% Fit the classifier
 neuron = SpectralNeuron(
-    dim=9,
+    dim=7,
     loss="log_loss",
-    max_iter=1000,
     random_state=7,
 )
 neuron.fit(X, y)
@@ -64,6 +63,6 @@ plt.show()
 
 # %% Plot the training loss
 fig, ax = plt.subplots(figsize=(7, 4), layout="constrained")
-ax.plot(np.arange(1, neuron.n_iter_ + 1), neuron.loss_curve_)
-ax.set(xlabel="Epoch", ylabel="Mean log loss", title="Spectral neuron training loss")
+ax.plot(np.arange(1, neuron.n_accepted_ + 1), neuron.loss_curve_)
+ax.set(xlabel="Accepted step", ylabel="Mean log loss", title="Spectral neuron training loss")
 plt.show()

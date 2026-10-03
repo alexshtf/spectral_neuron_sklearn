@@ -5,7 +5,7 @@ import pytest
 from scipy.special import expit
 from sklearn.exceptions import NotFittedError
 
-from spectral_neuron import LBFGSFitter, SpectralModel, SpectralNeuron
+from spectral_neuron import ProximalBundleFitter, SpectralModel, SpectralNeuron
 
 
 @pytest.mark.parametrize("loss", ["squared_error", "absolute_error", "log_loss"])
@@ -73,13 +73,14 @@ def test_estimator_matches_direct_fitter_and_diagnostics(loss):
     X = rng.uniform(-1, 1, size=(23, 2))
     y = rng.binomial(1, 0.5, len(X)) if loss == "log_loss" else X[:, 0] ** 2 - X[:, 1]
     options = dict(dim=3, loss=loss, n_init=3, max_iter=4, tol=0, random_state=5)
-    direct = LBFGSFitter(**options)
+    direct = ProximalBundleFitter(**options)
     model = direct.fit(X, y)
     estimator = SpectralNeuron(**options).fit(X, y)
     np.testing.assert_array_equal(estimator.model_.coefficients, model.coefficients)
     diagnostics = (
-        "initialization_losses_", "initial_loss_", "converged_",
-        "message_", "n_evaluations_", "gradient_norm_",
+        "initialization_objectives_", "initial_loss_", "converged_",
+        "message_", "n_evaluations_", "n_accepted_", "used_affine_",
+        "objective_", "model_decrease_", "duality_gap_",
     )
     for name in (*diagnostics, "loss_curve_", "n_iter_"):
         np.testing.assert_equal(getattr(estimator, name), getattr(direct, name))

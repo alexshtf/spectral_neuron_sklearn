@@ -65,33 +65,40 @@ eigenvalue as a single feature column, including for classification.
 After fitting, `neuron.feature_strengths_` gives one sensitivity bound per input
 feature for the raw eigenvalue output; see [feature strengths](docs/explanation.md#feature-strengths).
 
-Fitting selects the best of `n_init=50` convex fits of random spectral features,
-then refines the matrices with full-batch L-BFGS and a weak-Wolfe line search.
-All three losses are exact. Inputs and regression targets are scaled internally;
-predictions and feature strengths use the original units. No learning rate is
-needed.
+Fitting selects the best of `n_init=50` convex affine fits of random spectral
+features, then refines the matrices with a full-batch proximal bundle method.
+All three losses are exact. Inputs and regression targets are standardized
+internally; predictions and feature strengths use the original units. No
+learning rate is needed.
 
-Defaults are `max_iter=300` and `tol=1e-5`. Set `max_iter=0` to retain the convex
-initialization, or `tol=0` to disable the positive gradient threshold.
-`initialization_losses_` and `initial_loss_` describe initialization;
-`loss_curve_` records one training loss per accepted step. `converged_`,
-`message_`, `n_evaluations_`, and `gradient_norm_` describe termination.
-A numerical gradient criterion is not a general nonsmooth stationarity
-certificate. Unsuccessful termination with a positive iteration budget raises
-`ConvergenceWarning`.
+`alpha=0` is unregularized. A positive `alpha` penalizes the sum of feature
+matrix operator norms in standardized coordinates and can set entire feature
+matrices to zero. For example, use `SpectralNeuron(alpha=0.01)`.
+
+Defaults are `max_iter=300` and `tol=1e-6`. The iteration budget counts every
+trial, including rejected steps; `max_iter=0` returns the better initialization
+or affine baseline. The final model is always compared with that baseline using
+the training objective.
+
+`loss_curve_` records accepted training losses in original units;
+`objective_curve_` records their standardized, penalized objectives.
+`converged_`, `message_`, `model_decrease_`, and `duality_gap_` describe
+termination. A small local model decrease is not a general nonsmooth
+stationarity certificate. Budget exhaustion or numerical failure with a
+positive iteration budget raises `ConvergenceWarning`.
 
 See [initialization and training](docs/explanation.md#initialization), or
 `help(SpectralNeuron)` for the full API.
 
 ## Fitting without the estimator
 
-`LBFGSFitter` exposes the same fitting procedure directly. Its `fit` method
+`ProximalBundleFitter` exposes the same fitting procedure directly. Its `fit` method
 returns an inference-only `SpectralModel`:
 
 ```python
-from spectral_neuron import LBFGSFitter
+from spectral_neuron import ProximalBundleFitter
 
-fitter = LBFGSFitter(dim=5, random_state=7)
+fitter = ProximalBundleFitter(dim=5, random_state=7)
 model = fitter.fit(X, y)
 print(model([[0.2], [0.6]]))
 print(fitter.loss_, fitter.message_)

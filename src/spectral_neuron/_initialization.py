@@ -1,10 +1,12 @@
-"""Fit affine coefficients and amplitude for random spectral shapes."""
+"""Fixed-scale spectral directions with convex affine calibration."""
+
+import warnings
 
 import numpy as np
 from scipy.linalg import lstsq
-from scipy.optimize import linprog
+from scipy.optimize import linprog, minimize
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
-from sklearn.utils.validation import assert_all_finite
 
 from ._loss import loss_and_gradient
 from .model import _symmetric_matrices
@@ -13,44 +15,65 @@ from .model import _symmetric_matrices
 def _sample_shapes(
     n_features: int, dim: int, rng: np.random.Generator
 ) -> np.ndarray:
-    """Draw a uniform direction in the space of traceless symmetric pencils.
+    """Draw centered feature spectra with operator norms summing to one.
 
-    Independent standard Gaussians in isometric packed coordinates have the
-    same law as ``(G + G.T) / 2`` for an iid standard Gaussian matrix G.
-    Project out each trace, then normalize the entire collection together.
-    Requires ``dim > 1``.
+    Gaussian isometric coordinates give symmetric matrices. Remove their
+    traces, center the feature spectra, then scale the whole pencil together.
+    The bias stays traceless. Requires ``dim > 1``.
     """
     i, j = np.tril_indices(dim)
     diagonal = i == j
     shapes = rng.standard_normal((n_features + 1, len(i)))
     shapes[:, diagonal] -= shapes[:, diagonal].mean(axis=1, keepdims=True)
-    return shapes / np.linalg.norm(shapes)
+    edges = np.linalg.eigvalsh(_symmetric_matrices(shapes[1:], dim))[:, [0, -1]]
+    shapes[1:, diagonal] -= edges.mean(axis=1, keepdims=True)
+    return shapes / (np.diff(edges, axis=1).sum() / 2)
 
 
-def _fit_linear(design: np.ndarray, y: np.ndarray, loss: str) -> np.ndarray:
-    """Fit an unregularized linear predictor; design includes its intercept."""
-    match loss:
-        case "squared_error":
-            return lstsq(design, y)[0]
-        case "absolute_error":
-            # LAD dual: maximize y @ u, with design.T @ u = 0 and |u| <= 1.
-            result = linprog(
-                -y,
-                A_eq=design.T,
-                b_eq=np.zeros(design.shape[1]),
-                bounds=(-1, 1),
-                method="highs",
+def _fit_affine(
+    X: np.ndarray,
+    y: np.ndarray,
+    loss: str,
+    alpha: float = 0.0,
+    offset: float | np.ndarray = 0.0,
+) -> np.ndarray:
+    """Fit mean loss(offset + intercept + X beta) + alpha ||beta||_1."""
+    design = np.column_stack((np.ones(len(X)), X))
+    if alpha == 0 and loss == "squared_error":
+        return lstsq(design, y - offset)[0]
+    if alpha == 0 and loss == "log_loss" and np.ndim(offset) == 0 and offset == 0:
+        return LogisticRegression(
+            C=np.inf, fit_intercept=False, solver="lbfgs", max_iter=1000, tol=1e-8
+        ).fit(design, y).coef_[0]
+
+    split = np.column_stack((X, -X))
+    if loss == "absolute_error":
+        # LAD dual: |u| <= 1/n, sum(u) = 0, and |X.T @ u| <= alpha.
+        result = linprog(
+            -(y - offset), A_ub=split.T, b_ub=np.full(split.shape[1], alpha),
+            A_eq=np.ones((1, len(y))), b_eq=[0.0],
+            bounds=(-1 / len(y), 1 / len(y)), method="highs",
+        )
+        if not result.success:
+            raise RuntimeError(f"Absolute-error initialization failed: {result.message}")
+        intercept, parts = -result.eqlin.marginals[0], -result.ineqlin.marginals
+    else:
+        def objective(coefficients):
+            value, derivative = loss_and_gradient(
+                offset + coefficients[0] + split @ coefficients[1:], y, loss
             )
-            if not result.success:
-                raise RuntimeError(f"Absolute-error initialization failed: {result.message}")
-            return -result.eqlin.marginals
-        case "log_loss":
-            fit = LogisticRegression(
-                C=np.inf, fit_intercept=False, solver="lbfgs", max_iter=1000, tol=1e-8
-            ).fit(design, y)
-            return fit.coef_[0]
-        case _:
-            raise ValueError(f"Unknown loss: {loss!r}")
+            return (value + alpha * coefficients[1:].sum(),
+                    np.r_[derivative.sum(), split.T @ derivative + alpha])
+
+        result = minimize(
+            objective, np.zeros(split.shape[1] + 1), jac=True, method="L-BFGS-B",
+            bounds=[(None, None)] + [(0, None)] * split.shape[1],
+            options={"gtol": 1e-8, "ftol": 1e-12, "maxiter": 1000},
+        )
+        if not result.success:
+            warnings.warn(f"Affine initialization stopped: {result.message}", ConvergenceWarning)
+        intercept, parts = result.x[0], result.x[1:]
+    return np.r_[intercept, parts[:X.shape[1]] - parts[X.shape[1]:]]
 
 
 def initialize(
@@ -61,47 +84,33 @@ def initialize(
     loss: str,
     n_init: int,
     rng: np.random.Generator,
-) -> tuple[np.ndarray, list[float]]:
-    """Return the best convex candidate and every candidate's training loss.
+    alpha: float = 0.0,
+) -> tuple[np.ndarray, list[float], np.ndarray]:
+    """Return the best nonlinear start, candidate objectives, and affine fit.
 
-    For the odd-dimensional middle eigenvalue, signed amplitudes can be
-    absorbed into the shapes. Otherwise, test both orientations of each draw
-    and replace negative-amplitude fits with the best affine fit. ``n_init``
-    counts candidate fits, including each orientation separately; an affine
-    fallback is fitted once as needed. Size-one matrices use only that fit.
+    Each random pencil has centered feature spectra and total feature norm
+    one. Keep that nonlinear scale fixed and fit only identity shifts. Then
+    ``||p_i I + S_i||_op = |p_i| + ||S_i||_op``, so affine calibration is
+    convex and every recorded objective includes the exact norm penalty.
+    Size-one matrices need only the regularized affine fit.
     """
-    affine_design = np.column_stack((np.ones(len(X)), X))
-    if dim == 1:
-        linear = _fit_linear(affine_design, y, loss)
-        value, _ = loss_and_gradient(affine_design @ linear, y, loss)
-        return linear[:, None], [value]
-
+    design = np.column_stack((np.ones(len(X)), X))
     i, j = np.tril_indices(dim)
     identity = (i == j).astype(float)
-    middle = 2 * eig_idx == dim - 1
-    orientations = 1 if middle else 2
-    design = np.column_stack((affine_design, np.zeros(len(X))))
-    affine_fit = None
-    candidate_losses = []
-    best_loss = np.inf
-    for start in range(0, n_init, orientations):
+    linear = _fit_affine(X, y, loss, alpha)
+    affine = linear[:, None] * identity
+    if dim == 1:
+        value = loss_and_gradient(design @ linear, y, loss)[0]
+        return affine, [value + alpha * np.abs(linear[1:]).sum()], affine
+
+    objectives, best = [], np.inf
+    for _ in range(n_init):
         shapes = _sample_shapes(X.shape[1], dim, rng)
-        eigenvalues = np.linalg.eigvalsh(
-            _symmetric_matrices(affine_design @ shapes, dim)
-        )
-        for orientation in range(min(orientations, n_init - start)):
-            sign = 1 if orientation == 0 else -1
-            index = eig_idx if sign == 1 else dim - 1 - eig_idx
-            design[:, -1] = sign * eigenvalues[:, index]
-            linear = _fit_linear(design, y, loss)
-            if not middle and linear[-1] < 0:
-                if affine_fit is None:
-                    affine_fit = _fit_linear(affine_design, y, loss)
-                linear = np.r_[affine_fit, 0.0]
-            value, _ = loss_and_gradient(design @ linear, y, loss)
-            assert_all_finite(value)
-            candidate_losses.append(value)
-            if value < best_loss:
-                best_loss = value
-                coefficients = linear[:-1, None] * identity + linear[-1] * sign * shapes
-    return coefficients, candidate_losses
+        offset = np.linalg.eigvalsh(_symmetric_matrices(design @ shapes, dim))[:, eig_idx]
+        linear = _fit_affine(X, y, loss, alpha, offset)
+        value = loss_and_gradient(offset + design @ linear, y, loss)[0]
+        value += alpha * (np.abs(linear[1:]).sum() + 1.0)
+        objectives.append(value)
+        if value < best:
+            best, coefficients = value, shapes + linear[:, None] * identity
+    return coefficients, objectives, affine
