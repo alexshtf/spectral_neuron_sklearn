@@ -29,33 +29,56 @@ For `loss="log_loss"`, this is a bound on logits. Strengths are unnormalized
 sensitivity bounds in the input units seen by the neuron; in a preprocessing
 pipeline, they describe the transformed feature coordinates.
 
+With `onehot_groups`, the reference feature in each group always has zero
+strength. A group is removed only when all its feature strengths are zero.
+Group indices are one-based, whereas `feature_strengths_` uses ordinary
+zero-based array indexing.
+
 ## Objective and scaling
 
-`ProximalBundleFitter` standardizes each input column and, for regression, the
-training targets. It minimizes
+`ProximalBundleFitter` standardizes ungrouped input columns and, for regression,
+the training targets. Columns in `onehot_groups` are centered without rescaling.
+Writing $\mathcal G$ for the groups and $U$ for the ungrouped feature indices,
+it minimizes
 
 $$
 F(A)=\frac1N\sum_{j=1}^N\ell\bigl(f(\tilde x_j),\tilde y_j\bigr)
-+\alpha\sum_{i=1}^n\|A_i\|_{\mathrm{op}}.
++\alpha R(A),\qquad
+R(A)=\sum_{i\in U}\|A_i\|_{\mathrm{op}}
++\sum_{G\in\mathcal G}\max_{\substack{i,j\in G\\i<j}}
+\|A_i-A_j\|_{\mathrm{op}}.
 $$
 
 The bias matrix $A_0$ is unpenalized. `alpha=0` gives an unregularized fit;
 positive values encourage small feature sensitivities and can set whole feature
-matrices to zero. The penalty uses standardized coordinates. The returned
-model and `feature_strengths_` use original input and target units.
+matrices to zero. Each group's diameter replaces its individual matrix
+penalties and measures the largest matrix change between two categories. It
+bounds the corresponding change in any selected eigenvalue. The diameter
+includes every pair, not just differences from the reference category.
 
-Inputs are standardized column by column, without whitening: mixing feature
-coordinates would couple their penalties and change the meaning of a zero
-feature matrix. Classification targets remain binary labels encoded as 0 and 1.
+For each group, the first listed matrix is fixed to zero throughout fitting,
+even with `alpha=0`. With a complete one-hot encoding, this preserves expressive
+power: subtract the reference matrix from every matrix in the group and add it
+to $A_0$. Zero diameter then means every group matrix is exactly zero. For
+arbitrary numeric inputs, the fitter solves the same anchored objective; it
+does not verify one-hot encoding.
+
+`onehot_groups` must contain disjoint groups of at least two distinct integer
+indices in $1,\ldots,n$; index 0 is reserved for the bias. With no groups,
+$R$ is the existing sum of individual operator norms. The returned model and
+`feature_strengths_` use original input and target units. Scaling never mixes
+feature coordinates. Classification targets remain binary labels encoded as
+0 and 1.
 
 ## Initialization
 
 For each of `n_init=50` draws, the fitter samples symmetric nonlinear directions
-$T_i$. Feature directions have balanced extreme eigenvalues and joint scale
+$T_i$, with reference matrices fixed to zero. The remaining feature directions
+have balanced extreme eigenvalues and joint scale
 
 $$
 \lambda_{\max}(T_i)=-\lambda_{\min}(T_i),\qquad
-\sum_{i=1}^n\|T_i\|_{\mathrm{op}}=1.
+R(T)=1.
 $$
 
 It then fits the affine coefficients in $A_i=p_iI+T_i$. Since identity shifts
@@ -66,10 +89,13 @@ f(x)=p_0+\sum_{i=1}^nx_ip_i+
 \lambda_k\!\left(T_0+\sum_{i=1}^nx_iT_i\right).
 $$
 
-The spectral term is fixed during this convex fit. Balanced extreme eigenvalues
-also give $\|p_iI+T_i\|_{\mathrm{op}}=|p_i|+\|T_i\|_{\mathrm{op}}$, so the
-regularizer reduces to an L1 penalty on the affine feature coefficients plus a
-constant. Squared, absolute, and logistic loss all give convex subproblems.
+The spectral term is fixed during this convex fit, and reference coefficients
+$p_i$ stay zero. For ungrouped features, balanced extreme eigenvalues give
+$\|p_iI+T_i\|_{\mathrm{op}}=|p_i|+\|T_i\|_{\mathrm{op}}$. For grouped
+features, the norm of each difference is a maximum of two affine expressions
+in $p_i-p_j$, using the fixed extreme eigenvalues of $T_i-T_j$. Thus the
+entire regularizer has a linear epigraph, and all three losses give convex
+initialization problems.
 The nonlinear scale stays fixed during initialization, avoiding an affine start
 caused by a fitted scale of zero.
 
@@ -86,15 +112,22 @@ current point, to build a local piecewise-linear model $m$ of the data loss.
 Each trial approximately solves the convex problem
 
 $$
-\min_B\;m(B)+\alpha\sum_{i=1}^n\|B_i\|_{\mathrm{op}}
+\min_B\;m(B)+\alpha R(B)
 +\frac12\|B-A\|_H^2.
 $$
 
 The regularizer remains exact. Two BFGS curvature pairs define the positive
-metric $H$. A small dual problem combines the stored gradients; its inner
-computations use the operator-norm proximal map and a low-rank metric solve,
-without evaluating the dataset's eigenvalues again. The proximal map can return
-exactly zero feature matrices.
+metric $H$. A single projected-gradient dual solve combines the bundle weights
+and penalty matrices. It uses simplex projection for the weights and spectral
+soft-thresholding for the penalty matrices, with a shared threshold over all
+pairs in a group. With no groups, each penalty block contains one feature
+matrix; with `alpha=0`, there are no penalty variables.
+
+The dual objective is a smooth convex quadratic. Its curvature supplies the
+step sizes, and low-rank metric computations avoid evaluating the dataset's
+eigenvalues again. Coefficient recovery uses spectral clipping and can return
+exactly zero feature matrices or whole groups. The primal–dual gap, including
+recovery error, controls inner accuracy using the outer stopping conditions.
 
 A trial is accepted when the actual objective reduction is at least one tenth
 of the predicted reduction. Accepted trials weaken the quadratic penalty;

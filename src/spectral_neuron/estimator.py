@@ -31,6 +31,13 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         Penalty on the sum of feature matrix operator norms in standardized
         input/target coordinates. The bias is unpenalized. Positive values
         can remove entire feature matrices exactly.
+    onehot_groups : list of lists of int or None, default=None
+        Disjoint groups of at least two feature indices in 1..n_features.
+        Each group's maximum pairwise spectral distance replaces its individual
+        matrix penalties. The first listed matrix is fixed to zero, including
+        when alpha=0. Grouped inputs are centered without rescaling, so diameter
+        uses the supplied input units. Input values are not checked for one-hot
+        encoding.
     n_init : int, default=50
         Convex affine calibrations of fixed-norm nonlinear candidates. The
         lowest penalized objective initializes refinement. An affine baseline
@@ -74,6 +81,8 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
     feature_strengths_ : ndarray of shape (n_features_in_,)
         Spectral norms of the feature matrices. Each bounds raw output changes
         per unit change in that input feature, in the original units.
+        A group's reference always has zero strength; a removed group has zero
+        strength at every member.
     loss_ : str
         Objective used by the most recent fit.
     classes_ : ndarray
@@ -81,9 +90,10 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
 
     Notes
     -----
-    Fitting standardizes inputs and regression targets, then uses a full-batch
-    proximal bundle with two BFGS curvature pairs and an exact spectral-norm
-    prox. All stages use training data only. Budget exhaustion or solver failure
+    Fitting standardizes ungrouped inputs and regression targets, then uses a
+    full-batch proximal bundle with two BFGS curvature pairs. Its convex steps
+    use joint dual projection and a primal-dual accuracy bound. All stages use
+    training data only. Budget exhaustion or solver failure
     with a positive iteration budget raises ConvergenceWarning. See
     ProximalBundleFitter for details.
     """
@@ -96,6 +106,7 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
     max_iter: int = 300
     tol: float = 1e-6
     random_state: int | None = None
+    onehot_groups: list[list[int]] | None = None
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()

@@ -39,6 +39,8 @@ print(neuron.predict([[0.2], [0.6]]))
   regression using test R², RMSE, and residual histograms.
 - [Breast cancer](demos/breast_cancer.py): select features with spectral-norm
   regularization, refit without the penalty, and compare held-out classification.
+- [Titanic](demos/titanic.py): standardize numerical features, one-hot encode
+  categorical features, and select whole columns using matrix norms and diameters.
 
 These scripts use `# %%` cells, so you can run them cell by cell or as ordinary
 Python. For example:
@@ -47,8 +49,8 @@ Python. For example:
 uv run --group demos python demos/sine.py
 ```
 
-Replace `sine.py` with another demo name to run it. The housing demo downloads
-its dataset on the first run.
+Replace `sine.py` with another demo name to run it. The housing and Titanic demos
+download and cache their datasets on the first run.
 
 ## API at a glance
 
@@ -69,13 +71,30 @@ feature for the raw eigenvalue output; see [feature strengths](docs/explanation.
 
 Fitting selects the best of `n_init=50` convex affine fits of random spectral
 features, then refines the matrices with a full-batch proximal bundle method.
-All three losses are exact. Inputs and regression targets are standardized
-internally; predictions and feature strengths use the original units. No
-learning rate is needed.
+All three losses are exact. Inputs and regression targets are scaled internally;
+predictions and feature strengths use the original units. No learning rate is
+needed.
 
 `alpha=0` is unregularized. A positive `alpha` penalizes the sum of feature
 matrix operator norms in standardized coordinates and can set entire feature
 matrices to zero. For example, use `SpectralNeuron(alpha=0.01)`.
+
+Use `onehot_groups` to select categorical columns as whole groups:
+
+```python
+neuron = SpectralNeuron(alpha=0.01, onehot_groups=[[1, 2, 3], [5, 6]])
+neuron.fit(X, y)  # X has at least six columns.
+```
+
+Indices run from 1 through the number of input features; 0 is the bias. Groups
+must contain at least two distinct indices and cannot overlap. Each group is
+penalized by its diameter: the largest operator norm of a difference between
+any two of its matrices. The first listed matrix is fixed to zero, including
+when `alpha=0`. A removed group has all its matrices zero; its reference
+matrix alone being zero does not indicate removal. Grouped columns are centered
+without rescaling, so their diameters use the original indicator units.
+Ungrouped columns keep their individual penalties in standardized coordinates.
+The fitter does not check whether inputs are actually one-hot encoded.
 
 Defaults are `max_iter=300` and `tol=1e-6`. The iteration budget counts every
 trial, including rejected steps; `max_iter=0` returns the better initialization

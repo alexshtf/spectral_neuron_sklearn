@@ -77,7 +77,7 @@ def test_spectral_gradient_and_inverse_coordinate_maps(monkeypatch, eig_idx, los
         baseline = np.zeros_like(C)
         baseline[0, [0, 2, 5]] = 1000
         return C.copy(), [value], baseline
-    def minimize(fun, prox, penalty, x0, max_iter, tol, callback):
+    def minimize(fun, penalty, x0, max_iter, tol, callback):
         value, gradient = fun(x0)
         direction = rng.normal(size=x0.size)
         direction /= np.linalg.norm(direction)

@@ -12,7 +12,7 @@ from sklearn.utils.validation import assert_all_finite, check_scalar, check_X_y
 from ._bundle import minimize
 from ._initialization import initialize
 from ._loss import LOSSES, loss_and_gradient
-from ._penalty import prox as penalty_prox, value as penalty_value
+from ._penalty import SpectralPenalty
 from .model import SpectralModel, _resolve_eig_idx, _symmetric_matrices
 
 
@@ -23,10 +23,15 @@ class ProximalBundleFitter:
     Standardize inputs and regression targets, convexly calibrate ``n_init``
     random nonlinear candidates, then refine their best penalized objective.
     The bundle retains 20 loss observations and two BFGS curvature pairs.
-    Its spectral-norm prox can remove entire feature matrices exactly.
+    Joint dual projection can remove entire feature matrices or groups exactly.
 
     ``alpha`` multiplies the sum of feature matrix operator norms in these
-    standardized coordinates; the bias is unpenalized. ``max_iter`` counts
+    standardized coordinates; the bias is unpenalized. ``onehot_groups``
+    replaces individual penalties by each group's maximum pairwise spectral
+    distance. Groups use disjoint 1-based feature indices, with at least two
+    entries. The first listed matrix is fixed to zero, even when alpha is zero.
+    Grouped inputs are centered without rescaling; their values are not checked
+    for one-hot encoding. ``max_iter`` counts
     trial steps, including rejected trials. Zero returns the better of the
     nonlinear initialization and the affine baseline. ``tol`` bounds relative
     bundle-model decrease; it is not a nonsmooth stationarity certificate.
@@ -59,6 +64,7 @@ class ProximalBundleFitter:
     max_iter: int = 300
     tol: float = 1e-6
     random_state: int | None = None
+    onehot_groups: list[list[int]] | None = None
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> SpectralModel:
         """Fit dense numeric arrays and return a model in original units."""
@@ -76,8 +82,11 @@ class ProximalBundleFitter:
         if self.loss == "log_loss" and not np.array_equal(np.unique(y), [0, 1]):
             raise ValueError("log_loss requires both binary targets 0 and 1")
 
-        scaler = StandardScaler()
-        X = scaler.fit_transform(X)
+        penalty = SpectralPenalty(X.shape[1], self.dim, self.alpha, self.onehot_groups)
+        scaler = StandardScaler().fit(X)
+        if penalty.groups:
+            scaler.scale_[penalty.free[np.concatenate(penalty.groups)] - 1] = 1.0
+        X = scaler.transform(X)[:, penalty.free[1:] - 1]
         target_mean, target_scale = 0.0, 1.0
         if self.loss != "log_loss":
             target_mean, target_scale = float(y.mean()), float(y.std()) or 1.0
@@ -85,7 +94,7 @@ class ProximalBundleFitter:
         loss_scale = target_scale**2 if self.loss == "squared_error" else target_scale
         coefficients, objectives, affine = initialize(
             X, y, self.dim, eig_idx, self.loss, self.n_init,
-            np.random.default_rng(self.random_state), self.alpha,
+            np.random.default_rng(self.random_state), self.alpha, penalty=penalty,
         )
         self.initialization_objectives_ = objectives
         design = np.column_stack((np.ones(len(X)), X))
@@ -102,14 +111,6 @@ class ProximalBundleFitter:
             gradient = design.T @ (derivative[:, None] * sensitivity)
             return value, gradient.ravel()
 
-        def penalty(flat):
-            return self.alpha * penalty_value(flat.reshape(shape), self.dim) if self.alpha else 0.0
-
-        def prox(flat, step):
-            return penalty_prox(
-                flat.reshape(shape), step * self.alpha, self.dim
-            ).ravel()
-
         self.loss_curve_, self.objective_curve_ = [], []
 
         def record(_, loss, value):
@@ -120,7 +121,7 @@ class ProximalBundleFitter:
         self.initial_loss_ = initial_loss * loss_scale
         self.initial_objective_ = initial_loss + penalty(coefficients.ravel())
         result = minimize(
-            objective, prox, penalty, coefficients.ravel(),
+            objective, penalty, coefficients.ravel(),
             self.max_iter, self.tol, record,
         )
         affine_loss = loss_and_gradient(design @ affine[:, 0], y, self.loss)[0]
@@ -134,6 +135,9 @@ class ProximalBundleFitter:
         self.converged_, self.message_ = bool(result.success), str(result.message)
         self.model_decrease_, self.duality_gap_ = result.model_decrease_bound, result.model_gap
 
+        expanded = np.zeros((scaler.n_features_in_ + 1, shape[1]))
+        expanded[penalty.free] = coefficients
+        coefficients = expanded
         coefficients[1:] /= scaler.scale_[:, None]
         coefficients[0] -= scaler.mean_ @ coefficients[1:]
         coefficients *= target_scale

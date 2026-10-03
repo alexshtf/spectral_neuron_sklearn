@@ -1,10 +1,9 @@
 """Composite proximal bundle descent with a rank-four BFGS metric."""
 
 from collections import deque
-from functools import lru_cache
 
 import numpy as np
-from scipy.optimize import OptimizeResult, minimize as _minimize, root
+from scipy.optimize import OptimizeResult
 
 
 def _inverse_product(vector, pairs):
@@ -29,78 +28,92 @@ def _metric(pairs, size):
     return span @ rotation, correction
 
 
-def _subproblem(centre, gradients, errors, damping, pairs, prox, penalty, weights):
-    """Solve the simplex dual, using a root of dimension at most four per prox."""
+def _simplex(vector):
+    shifted = vector - vector.max()
+    ordered = np.sort(shifted)[::-1]
+    threshold = np.max((np.cumsum(ordered) - 1) / np.arange(1, len(vector) + 1))
+    projected = np.maximum(shifted - threshold, 0)
+    return projected / projected.sum()
+
+
+def _subproblem(centre, gradients, errors, damping, pairs, penalty, weights, flow, goal):
+    """Jointly project cut weights and penalty duals, certifying primal recovery."""
+    # Parallel cuts differ only in height; only their lowest error matters.
+    order = np.argsort(errors)
+    _, first, inverse = np.unique(gradients[order], axis=0, return_index=True, return_inverse=True)
+    indices = order[first]
+    original_size = len(weights)
+    weights = np.bincount(inverse, weights=weights[order])
+    gradients, errors = gradients[indices], errors[indices]
     basis, correction = _metric(pairs, len(centre))
-    latent = np.zeros(len(correction))
+
+    def inverse_metric(vector):
+        return vector + basis @ (correction * (basis.T @ vector))
+
+    def quadratic(vector):
+        coordinates = basis.T @ vector
+        orthogonal = vector - basis @ coordinates
+        return orthogonal @ orthogonal + np.sum(coordinates**2 / (1 + correction))
+
+    projected = gradients @ basis
+    gram = gradients @ gradients.T + (projected * correction) @ projected.T
+    # Twice each block's curvature bounds the coupled dual Hessian.
+    weight_step = .5 / max(np.linalg.eigvalsh(gram).max() / damping, 1e-10)
+    flow_bound = np.max(1 + correction, initial=1) * penalty.norm_squared / damping
+    flow_step = .5 / max(flow_bound, 1e-10)
+    weights = weights.copy()
+    flow = np.zeros_like(penalty.apply(centre)) if flow is None else flow.copy()
+    accelerated_weights, accelerated_flow = weights.copy(), flow.copy()
+    momentum = 1.0
     centre_penalty = penalty(centre)
-
-    def quadratic(step):
-        return step @ step - np.sum(correction / (1 + correction) * (basis.T @ step)**2)
-
-    def metric_prox(aggregate):
-        nonlocal latent
-        shifted = centre - (aggregate + basis @ (correction * (basis.T @ aggregate))) / damping
-
-        @lru_cache(maxsize=1)
-        def recover(a):
-            argument = shifted - basis @ (correction * a) / damping
-            # Ordinary prox recovery preserves exact zeros before root convergence.
-            trial = prox(argument, 1 / damping)
-            dual = (argument - trial) * damping
-            residual = a - basis.T @ dual
-            gap = np.sum(correction**2 / (1 + correction) * residual**2) / (2 * damping)
-            return trial, residual, gap
-
-        # An exact root needs no solve; this also covers alpha=0.
-        if len(correction) and np.any(recover(tuple(latent))[1]):
-            latent = root(lambda a: recover(tuple(a))[1], latent, method="hybr",
-                          options={"xtol": 1e-10, "maxfev": 100}).x
-        trial, _, gap = recover(tuple(latent))
-        return trial, gap
-
-    metric_norms = np.sum(gradients**2, axis=1)
-    metric_norms += np.sum((gradients @ basis)**2 * correction, axis=1)
-    scale = max(metric_norms.max() / damping, errors.max(), centre_penalty, 1e-12)
-
-    def dual(weights):
-        aggregate = weights @ gradients
-        trial, _ = metric_prox(aggregate)
+    for _ in range(10000):
+        aggregate = accelerated_weights @ gradients + penalty.adjoint(accelerated_flow)
+        raw = centre - inverse_metric(aggregate) / damping
+        next_weights = _simplex(
+            accelerated_weights - weight_step * (errors - gradients @ (raw - centre))
+        )
+        next_flow, normal = penalty.project(accelerated_flow + flow_step * penalty.apply(raw))
+        aggregate = next_weights @ gradients + penalty.adjoint(next_flow)
+        raw = centre - inverse_metric(aggregate) / damping
+        # Clipped spectra produce exact zeros; the gap includes recovery error.
+        trial = penalty.recover(normal / flow_step, raw)
         step = trial - centre
-        value = errors @ weights - aggregate @ step - penalty(trial) + centre_penalty
-        value -= damping * quadratic(step) / 2
-        return value / scale, (errors - gradients @ step) / scale
+        cuts = gradients @ step - errors
+        trial_penalty = penalty(trial)
+        predicted = centre_penalty - trial_penalty - cuts.max() - damping * quadratic(step) / 2
+        gap = cuts.max() - next_weights @ cuts + trial_penalty
+        gap -= np.sum(next_flow * penalty.apply(trial))
+        gap = max(float(gap + damping * quadratic(trial - raw) / 2), 0.0)
+        if (predicted + gap <= goal or predicted > 0 and gap <= .1 * predicted
+                or not np.isfinite([predicted, gap]).all()):
+            break
+        next_momentum = (1 + np.sqrt(1 + 4 * momentum**2)) / 2
+        restart = ((accelerated_weights - next_weights) @ (next_weights - weights) / weight_step
+                   + np.sum((accelerated_flow - next_flow) * (next_flow - flow)) / flow_step)
+        extrapolation = (momentum - 1) / next_momentum
+        if restart > 0:
+            next_momentum, extrapolation = 1.0, 0.0
+        accelerated_weights = next_weights + extrapolation * (next_weights - weights)
+        accelerated_flow = next_flow + extrapolation * (next_flow - flow)
+        weights, flow, momentum = next_weights, next_flow, next_momentum
+    weights = np.zeros(original_size)
+    weights[indices] = next_weights
+    return trial, float(predicted), weights, next_flow, gap
 
-    fit = _minimize(
-        dual, weights, jac=True, method="SLSQP", bounds=[(0.0, 1.0)] * len(errors),
-        constraints={"type": "eq", "fun": lambda w: w.sum() - 1,
-                     "jac": lambda w: np.ones(len(w))},
-        options={"ftol": 1e-14, "maxiter": 1000},
-    )
-    weights = np.maximum(fit.x, 0.0)
-    weights /= weights.sum()
-    trial, prox_gap = metric_prox(weights @ gradients)
-    step = trial - centre
-    cuts = gradients @ step - errors
-    predicted = centre_penalty - penalty(trial) - cuts.max() - damping * quadratic(step) / 2
-    # The two gaps certify the convex subproblem, not the original objective.
-    gap = max(float(cuts.max() - weights @ cuts + prox_gap), 0.0)
-    return trial, float(predicted), weights, gap
 
-
-def minimize(fun, prox, penalty, x, max_iter, tol, callback=None):
+def minimize(fun, penalty, x, max_iter, tol, callback=None):
     """Minimize loss plus penalty; ``max_iter`` counts evaluated trial points.
 
-    ``fun`` returns the data loss and gradient; ``prox`` and ``penalty`` include
-    the regularization weight. The callback receives accepted (x, loss, total).
-    Model tolerance is a numerical stopping rule, not a stationarity certificate.
+    ``fun`` returns the data loss and gradient; ``penalty`` includes its weight.
+    The callback receives accepted (x, loss, total). Model tolerance is a
+    numerical stopping rule, not a stationarity certificate.
     """
     x = x.copy()
     loss, gradient = fun(x)
     value = loss + penalty(x)
     bundle = deque([(x.copy(), loss, gradient.copy())], maxlen=20)
     pairs = deque(maxlen=2)
-    weights = np.full(2, 0.5)
+    weights, flow = np.full(2, 0.5), None
     damping, trials = 1.0, 0
     gap = decrease_bound = None
     success = False
@@ -112,9 +125,10 @@ def minimize(fun, prox, penalty, x, max_iter, tol, callback=None):
             np.abs(losses - loss - np.sum(gradients * distances, axis=1)),
             np.sum(distances**2, axis=1),
         )
+        goal = tol * max(1.0, abs(value))
         try:
-            trial, predicted, weights, gap = _subproblem(
-                x, gradients, errors, damping, pairs, prox, penalty, weights,
+            trial, predicted, weights, flow, gap = _subproblem(
+                x, gradients, errors, damping, pairs, penalty, weights, flow, goal,
             )
         except np.linalg.LinAlgError:
             message = "Convex subproblem lost numerical accuracy."
@@ -123,7 +137,7 @@ def minimize(fun, prox, penalty, x, max_iter, tol, callback=None):
         if not np.isfinite([predicted, gap]).all():
             message = "Convex subproblem returned a nonfinite model bound."
             break
-        if decrease_bound <= tol * max(1.0, abs(value)):
+        if decrease_bound <= goal:
             success = True
             message = "Bundle model decrease below tolerance."
             break
