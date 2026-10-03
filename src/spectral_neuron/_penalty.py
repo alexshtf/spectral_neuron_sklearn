@@ -1,8 +1,16 @@
 """Operator-norm penalty and Frobenius prox for symmetric feature matrices."""
 
+from functools import cache
+
 import numpy as np
 
 from .model import _symmetric_matrices
+
+
+@cache
+def _packing(dim):
+    i, j = np.tril_indices(dim)
+    return i, j, np.where(i == j, 1.0, np.sqrt(2.0))
 
 
 def value(coefficients, dim):
@@ -18,11 +26,10 @@ def prox(coefficients, tau, dim):
     eigenvalues, vectors = np.linalg.eigh(_symmetric_matrices(coefficients[1:], dim))
     ordered = np.sort(np.abs(eigenvalues), axis=-1)[:, ::-1]
     thresholds = (np.cumsum(ordered, axis=-1) - tau) / np.arange(1, dim + 1)
-    active = np.maximum(np.sum(ordered > thresholds, axis=-1), 1)
-    cap = np.maximum(thresholds[np.arange(len(active)), active - 1], 0.0)
+    cap = np.maximum(thresholds.max(axis=-1), 0.0)
     clipped = np.clip(eigenvalues, -cap[:, None], cap[:, None])
     matrices = (vectors * clipped[:, None, :]) @ vectors.swapaxes(-1, -2)
-    i, j = np.tril_indices(dim)
+    i, j, factors = _packing(dim)
     result = coefficients.copy()
-    result[1:] = matrices[:, i, j] * np.where(i == j, 1.0, np.sqrt(2.0))
+    result[1:] = matrices[:, i, j] * factors
     return result

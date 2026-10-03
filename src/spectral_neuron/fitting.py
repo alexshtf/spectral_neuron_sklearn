@@ -103,7 +103,7 @@ class ProximalBundleFitter:
             return value, gradient.ravel()
 
         def penalty(flat):
-            return self.alpha * penalty_value(flat.reshape(shape), self.dim)
+            return self.alpha * penalty_value(flat.reshape(shape), self.dim) if self.alpha else 0.0
 
         def prox(flat, step):
             return penalty_prox(

@@ -1,6 +1,7 @@
 """Composite proximal bundle descent with a rank-four BFGS metric."""
 
 from collections import deque
+from functools import lru_cache
 
 import numpy as np
 from scipy.optimize import OptimizeResult, minimize as _minimize, root
@@ -41,6 +42,7 @@ def _subproblem(centre, gradients, errors, damping, pairs, prox, penalty, weight
         nonlocal latent
         shifted = centre - (aggregate + basis @ (correction * (basis.T @ aggregate))) / damping
 
+        @lru_cache(maxsize=1)
         def recover(a):
             argument = shifted - basis @ (correction * a) / damping
             # Ordinary prox recovery preserves exact zeros before root convergence.
@@ -50,10 +52,11 @@ def _subproblem(centre, gradients, errors, damping, pairs, prox, penalty, weight
             gap = np.sum(correction**2 / (1 + correction) * residual**2) / (2 * damping)
             return trial, residual, gap
 
-        if len(correction):
-            latent = root(lambda a: recover(a)[1], latent, method="hybr",
+        # An exact root needs no solve; this also covers alpha=0.
+        if len(correction) and np.any(recover(tuple(latent))[1]):
+            latent = root(lambda a: recover(tuple(a))[1], latent, method="hybr",
                           options={"xtol": 1e-10, "maxfev": 100}).x
-        trial, _, gap = recover(latent)
+        trial, _, gap = recover(tuple(latent))
         return trial, gap
 
     metric_norms = np.sum(gradients**2, axis=1)

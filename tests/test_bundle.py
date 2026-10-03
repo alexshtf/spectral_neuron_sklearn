@@ -23,6 +23,15 @@ def test_spectral_prox_satisfies_matrix_kkt_and_preserves_the_bias():
     np.testing.assert_array_equal(prox(coefficients, 0, 3), coefficients)
 
 
+@pytest.mark.parametrize("tau, expected", [
+    (.5, [-3.5, 1, 3]), (2, [-2.5, 1, 2.5]), (8, [0, 0, 0]),
+])
+def test_spectral_prox_clips_eigenvalues_and_zeroes_at_the_nuclear_norm(tau, expected):
+    coefficients = np.array([[0., 0, 0, 0, 0, 0], [-4., 0, 1, 0, 0, 3]])
+    fitted = _symmetric_matrices(prox(coefficients, tau, 3), 3)
+    np.testing.assert_allclose(fitted[1], np.diag(expected), atol=1e-15)
+
+
 def test_metric_bundle_subproblem_matches_an_independent_matrix_epigraph_solve():
     rng = np.random.default_rng(11)
     centre = np.array([.2, -.1, .3, 1.2, .4, -.5])
