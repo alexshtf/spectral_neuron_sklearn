@@ -37,6 +37,8 @@ print(neuron.predict([[0.2], [0.6]]))
 - [Spirals](demos/spirals.py): classify two spirals and plot the decision boundary.
 - [California housing](demos/california_housing.py): compare with linear
   regression using test R², RMSE, and residual histograms.
+- [Breast cancer](demos/breast_cancer.py): select features with spectral-norm
+  regularization, refit without the penalty, and compare held-out classification.
 
 These scripts use `# %%` cells, so you can run them cell by cell or as ordinary
 Python. For example:
