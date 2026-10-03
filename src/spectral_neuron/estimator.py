@@ -1,6 +1,6 @@
 """The scikit-learn spectral neuron estimator."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -13,6 +13,8 @@ from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import check_is_fitted, validate_data
 
 from spectral_neuron._fitting import AdamFitter
+from spectral_neuron._lbfgs import ConvexLBFGS2Fitter
+from spectral_neuron.fitting import ConvexAdamFitter
 
 
 @dataclass(kw_only=True, eq=False, repr=False)
@@ -27,32 +29,39 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         Zero-based index in ascending eigenvalue order; None selects dim // 2.
     loss : {'squared_error', 'absolute_error', 'log_loss'}
         Mean training objective. Log loss accepts any two class labels.
+    fitter : {'convex_lbfgs2', 'convex_adam', 'grouped_adam'}
+        Default 'convex_lbfgs2' uses convex initialization and exact-loss,
+        unscaled weak-Wolfe L-BFGS. The Adam alternatives remain available.
+    n_init : int, default=50
+        Convex candidate fits, counting opposite orientations separately.
+        Used by the convex fitters; a required affine fallback is fitted once
+        in addition to this budget. A size-one model uses an affine fit directly.
     feature_bound : float or 'auto', default='auto'
-        Positive bound R on absolute feature values for initialization. Diagonal
-        jitter is sampled from [-1 / (4 * n_features * R), 1 / (4 * n_features * R)].
-        'auto' uses the absolute maximum of the training features, or 1.0 if all
-        features are zero. The paper's initial eigengap guarantee applies when
-        each feature's magnitude is at most R.
+        Initialization bound for 'grouped_adam' only. 'auto' uses the largest
+        absolute training feature, or 1.0 if all features are zero.
     learning_rate : float, default=1e-3
-        Adam step size.
-    max_iter : int, default=500
-        Maximum number of epochs, each visiting every sample once.
-    batch_size : int, default=128
-        Maximum number of samples per update and evaluation batch.
-    tol : float, default=1e-6
-        Maximum absolute parameter displacement per epoch considered small.
-        Measured as the Euclidean norm of all packed coefficient changes,
-        equivalently the combined Frobenius norm of the matrix changes.
+        Adam step size; ignored by L-BFGS.
+    max_iter : int, default=300
+        Maximum L-BFGS steps or Adam epochs. For L-BFGS, zero returns the
+        initialized model without refinement.
+    batch_size : int or 'auto', default='auto'
+        Adam samples per update; 'auto' uses min(200, n_samples). L-BFGS is
+        full-batch and ignores this parameter.
+    tol : float, default=1e-5
+        L-BFGS gradient infinity-norm threshold in normalized coordinates;
+        zero disables a positive threshold. For 'convex_adam', required loss
+        improvement; for 'grouped_adam', small epoch displacement in Frobenius
+        norm. A numerical gradient threshold is not a nonsmooth certificate.
     n_iter_no_change : int, default=10
-        Stop after this many consecutive epochs with displacement at most tol.
-        Set tol=0 to disable this stopping criterion.
+        Stop after this many consecutive epochs without sufficient improvement
+        (or with small displacement for 'grouped_adam'). Set tol=0 to disable
+        Adam stopping. Ignored by L-BFGS.
     random_state : int or None, default=None
         Seed for a local NumPy generator used by initialization and shuffling.
     beta_1, beta_2 : float, default=0.9, 0.999
-        Decay rates of per-parameter signed-gradient momentum and per-group
-        mean squared-gradient estimates, respectively.
+        Adam moment decay rates; ignored by L-BFGS.
     epsilon : float, default=1e-8
-        Adam denominator offset.
+        Adam denominator offset; ignored by L-BFGS.
 
     Attributes
     ----------
@@ -61,16 +70,28 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
     n_features_in_ : int
         Number of features seen during fitting.
     feature_bound_ : float
-        Resolved feature bound used by the most recent fit.
+        Resolved initialization bound; present only for 'grouped_adam'.
+    initialization_losses_ : list of float
+        Training losses of convex candidates; present for the convex fitters.
+    initial_loss_ : float
+        Selected initialization's training loss; present for the convex fitters.
+    converged_ : bool
+        Whether a numerical tolerance stopped L-BFGS or patience stopped
+        'convex_adam'; neither certifies an optimum. L-BFGS budget exhaustion
+        or failure raises ConvergenceWarning for a positive iteration budget.
+    message_, n_evaluations_, gradient_norm_ : str, int, float
+        L-BFGS termination reason, solver evaluations, and final gradient
+        infinity norm in normalized coordinates.
     feature_strengths_ : ndarray of shape (n_features_in_,)
         Spectral norms of the learned feature matrices, excluding the intercept.
         Each value bounds the change in raw output per unit change in that
         input feature. For log loss, the raw output is the logit. Values are
         unnormalized and use the feature units received by the estimator.
     n_iter_ : int
-        Number of completed epochs.
+        Number of accepted L-BFGS steps or completed Adam epochs.
     loss_curve_ : list of float
-        Full training-data objective after each completed epoch.
+        Full training-data objective after each accepted step or epoch,
+        in original target units.
     loss_ : str
         Objective used by the most recent fit.
     classes_ : ndarray
@@ -78,25 +99,28 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
 
     Notes
     -----
-    Fitting uses Adam with three squared-gradient scales per coefficient
-    matrix. In an eigenbasis of the initial A_0, the groups are the selected
-    diagonal entry, its off-diagonal row and column, and the remaining
-    submatrix. Separate scales prevent the dominant gradients of the initially
-    nearly affine prediction from setting the scale for smaller gradients
-    that develop nonlinearity. Each parameter retains its own signed-gradient
-    momentum. The basis and groups stay fixed during fitting; all matrix
-    entries remain trainable. The initial basis change preserves predictions
-    and eigengaps. For dim=1, the update is ordinary scalar Adam.
+    Convex initialization fits affine coefficients and the amplitude of each
+    random spectral feature. The default fitter standardizes features and
+    regression targets internally, whitens the design, and refines all matrix
+    entries with exact-loss L-BFGS. Both stages use training data only. The
+    returned model uses original units and the last accepted iterate. Scale
+    inputs and regression targets yourself when selecting an Adam fitter.
+
+    The optional grouped fitter shares squared-gradient scales over three
+    parts of each matrix in the initial A_0 eigenbasis: the selected diagonal
+    entry, its off-diagonal row and column, and the remaining submatrix.
     """
 
     dim: int = 5
     eig_idx: int | None = None
     loss: str = "squared_error"
+    fitter: str = "convex_lbfgs2"
+    n_init: int = 50
     feature_bound: float | str = "auto"
     learning_rate: float = 1e-3
-    max_iter: int = 500
-    batch_size: int = 128
-    tol: float = 1e-6
+    max_iter: int = 300
+    batch_size: int | str = "auto"
+    tol: float = 1e-5
     n_iter_no_change: int = 10
     random_state: int | None = None
     beta_1: float = 0.9
@@ -127,14 +151,37 @@ class SpectralNeuron(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
                     "Only binary classification is supported. "
                     f"Got {len(classes)} class(es)."
                 )
-        feature_bound = self.feature_bound
-        if isinstance(feature_bound, str) and feature_bound == "auto":
-            feature_bound = float(max(-X.min(), X.max())) or 1.0
-        fitter = AdamFitter(
-            **(self.get_params(deep=False) | {"feature_bound": feature_bound})
-        )
+        parameters = self.get_params(deep=False)
+        method = parameters.pop("fitter")
+        feature_bound = parameters.pop("feature_bound")
+        if method == "convex_lbfgs2":
+            fitter = ConvexLBFGS2Fitter(**{
+                field.name: parameters[field.name] for field in fields(ConvexLBFGS2Fitter)
+            })
+        elif method == "convex_adam":
+            fitter = ConvexAdamFitter(**parameters)
+        elif method == "grouped_adam":
+            parameters.pop("n_init")
+            if feature_bound == "auto":
+                feature_bound = float(np.abs(X).max()) or 1.0
+            if parameters["batch_size"] == "auto":
+                parameters["batch_size"] = min(200, len(X))
+            fitter = AdamFitter(feature_bound=feature_bound, **parameters)
+        else:
+            raise ValueError("fitter must be 'convex_lbfgs2', 'convex_adam' or 'grouped_adam'")
         self.model_ = fitter.fit(X, y.astype(np.float64, copy=False))
-        self.feature_bound_ = float(feature_bound)
+        if method == "grouped_adam":
+            self.feature_bound_ = float(feature_bound)
+        else:
+            self.__dict__.pop("feature_bound_", None)
+        for name in (
+            "initialization_losses_", "initial_loss_", "converged_",
+            "message_", "n_evaluations_", "gradient_norm_",
+        ):
+            if hasattr(fitter, name):
+                setattr(self, name, getattr(fitter, name))
+            else:
+                self.__dict__.pop(name, None)
         self._n_features_out = 1
         self.n_iter_ = fitter.n_iter_
         self.loss_curve_ = fitter.loss_curve_

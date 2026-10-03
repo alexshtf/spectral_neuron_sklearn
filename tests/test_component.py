@@ -2,9 +2,10 @@ import pickle
 
 import numpy as np
 import pytest
+from scipy.special import expit
 from sklearn.exceptions import NotFittedError
 
-from spectral_neuron import SpectralModel, SpectralNeuron
+from spectral_neuron import ConvexLBFGS2Fitter, SpectralModel, SpectralNeuron
 
 
 @pytest.mark.parametrize("loss", ["squared_error", "absolute_error", "log_loss"])
@@ -12,7 +13,7 @@ def test_adam_fits_linear_regression_and_binary_classification(loss):
     X = np.linspace(-1.0, 1.0, 81)[:, None]
     y = (X[:, 0] > 0.1).astype(int) if loss == "log_loss" else 0.6 + 1.25 * X[:, 0]
     estimator = SpectralNeuron(
-        dim=1, loss=loss, learning_rate=0.025, max_iter=600,
+        dim=1, loss=loss, fitter="convex_adam", learning_rate=0.025, max_iter=600,
         batch_size=128, tol=0, random_state=3,
     )
     transformed = estimator.fit_transform(X, y)
@@ -28,7 +29,7 @@ def test_adam_fits_linear_regression_and_binary_classification(loss):
         probability = estimator.predict_proba(X)
         np.testing.assert_allclose(logits, estimator.transform(X)[:, 0])
         np.testing.assert_allclose(probability.sum(axis=1), 1)
-        np.testing.assert_allclose(probability[:, 1], 1 / (1 + np.exp(-logits)))
+        np.testing.assert_allclose(probability[:, 1], expit(logits))
         np.testing.assert_array_equal(estimator.predict(X), (logits >= 0).astype(int))
         assert np.mean(estimator.predict(X) == y) > 0.97
     else:
@@ -44,7 +45,7 @@ def test_dense_neuron_fits_nonlinear_function():
     X = np.linspace(-1, 1, 81)[:, None]
     y = np.sqrt(X[:, 0] ** 2 + 0.3**2)
     estimator = SpectralNeuron(
-        dim=3, eig_idx=2, learning_rate=0.025, max_iter=600,
+        dim=3, eig_idx=2, n_init=10, learning_rate=0.025, max_iter=600,
         tol=0, random_state=7,
     ).fit(X, y)
     assert np.mean((estimator.predict(X) - y) ** 2) < 5e-4
@@ -76,13 +77,35 @@ def test_fitting_is_reproducible_and_pickle_preserves_predictions():
 )
 def test_auto_feature_bound_matches_explicit_bound(X, expected_bound):
     y = np.linspace(-1, 1, len(X))
-    options = dict(dim=3, max_iter=4, tol=0, random_state=7)
+    options = dict(dim=3, fitter="grouped_adam", max_iter=4, tol=0, random_state=7)
     automatic = SpectralNeuron(**options).fit(X, y)
     explicit = SpectralNeuron(**options, feature_bound=expected_bound).fit(X, y)
     assert automatic.feature_bound == "auto"
     assert automatic.feature_bound_ == explicit.feature_bound_ == expected_bound
     np.testing.assert_array_equal(automatic.model_.coefficients, explicit.model_.coefficients)
     np.testing.assert_array_equal(automatic.loss_curve_, explicit.loss_curve_)
+
+
+@pytest.mark.parametrize("loss", ["squared_error", "absolute_error", "log_loss"])
+def test_default_fitter_matches_direct_fit_and_refit_clears_its_diagnostics(loss):
+    rng = np.random.default_rng(6)
+    X = rng.uniform(-1, 1, size=(23, 2))
+    y = rng.binomial(1, 0.5, len(X)) if loss == "log_loss" else X[:, 0] ** 2 - X[:, 1]
+    options = dict(dim=3, loss=loss, n_init=3, max_iter=4, tol=0, random_state=5)
+    direct = ConvexLBFGS2Fitter(**options)
+    model = direct.fit(X, y)
+    estimator = SpectralNeuron(**options).fit(X, y)
+    np.testing.assert_array_equal(estimator.model_.coefficients, model.coefficients)
+    diagnostics = (
+        "initialization_losses_", "initial_loss_", "converged_",
+        "message_", "n_evaluations_", "gradient_norm_",
+    )
+    for name in (*diagnostics, "loss_curve_", "n_iter_"):
+        np.testing.assert_equal(getattr(estimator, name), getattr(direct, name))
+    estimator.set_params(fitter="convex_adam").fit(X, y)
+    assert all(not hasattr(estimator, name) for name in diagnostics[3:])
+    estimator.set_params(fitter="grouped_adam").fit(X, y)
+    assert all(not hasattr(estimator, name) for name in diagnostics)
 
 
 @pytest.mark.parametrize("loss", ["squared_error", "log_loss"])
@@ -97,7 +120,7 @@ def test_feature_strengths_are_raw_spectral_norms_of_feature_matrices(loss):
     )
     i, j = np.tril_indices(2)
     coefficients = matrices[:, i, j] * np.where(i == j, 1.0, np.sqrt(2.0))
-    estimator = SpectralNeuron(dim=2, loss=loss, max_iter=1, random_state=7)
+    estimator = SpectralNeuron(dim=2, loss=loss, max_iter=1, tol=0, random_state=7)
     estimator.fit(np.zeros((4, 3)), np.array([0, 1, 0, 1]))
     estimator.model_ = SpectralModel(coefficients, dim=2, eig_idx=1)
     strengths = estimator.feature_strengths_
@@ -109,7 +132,7 @@ def test_feature_strengths_are_raw_spectral_norms_of_feature_matrices(loss):
 
 
 def test_feature_strengths_require_fitting_and_refresh_after_refit():
-    estimator = SpectralNeuron(dim=1, max_iter=1, random_state=7)
+    estimator = SpectralNeuron(dim=1, max_iter=1, tol=0, random_state=7)
     with pytest.raises(NotFittedError):
         estimator.feature_strengths_
     X = np.linspace(-1, 1, 6)[:, None]
@@ -133,6 +156,6 @@ def test_component_checks_fit_state_shape_and_logistic_targets():
         SpectralNeuron().fit(np.ones(3), np.ones(3))
     with pytest.raises(ValueError):
         SpectralNeuron(loss="log_loss").fit(np.ones((3, 1)), np.array([0, 1, 2]))
-    estimator = SpectralNeuron(dim=1, max_iter=1).fit(np.ones((3, 1)), np.ones(3))
+    estimator = SpectralNeuron(dim=1, max_iter=1, tol=0).fit(np.ones((3, 1)), np.ones(3))
     with pytest.raises(ValueError):
         estimator.transform(np.ones((3, 2)))
