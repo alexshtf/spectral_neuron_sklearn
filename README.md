@@ -2,7 +2,16 @@
 
 A nonlinear model for regression and binary classification, with a scikit-learn
 interface. Its prediction is one eigenvalue of a learned, input-dependent
-symmetric matrix.
+symmetric matrix. Namely, a spectral neuron combines learned symmetric matrices using the input features
+as weights, then returns one eigenvalue:
+
+$$
+A(x) = A_0 + \sum_{i=1}^{n} x_i A_i,
+\qquad f(x) = \lambda_k(A(x)).
+$$
+
+Taking an eigenvalue introduces nonlinearity. So we obtain a model whose performance and expressive power scales with matrix dimensions,
+while retaining some of the simplicity and interpretability of linear models. 
 
 Uses NumPy, SciPy, and scikit-learn. Requires Python 3.12 or newer.
 
