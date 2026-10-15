@@ -65,7 +65,7 @@ does not verify one-hot encoding.
 
 `onehot_groups` must contain disjoint groups of at least two distinct integer
 indices in $1,\ldots,n$; index 0 is reserved for the bias. With no groups,
-$R$ is the existing sum of individual operator norms. The returned model and
+$R$ is the sum of individual operator norms. The returned model and
 `feature_strengths_` use original input and target units. Scaling never mixes
 feature coordinates. Classification targets remain binary labels encoded as
 0 and 1.
@@ -120,8 +120,11 @@ The regularizer remains exact. Two BFGS curvature pairs define the positive
 metric $H$. A single projected-gradient dual solve combines the bundle weights
 and penalty matrices. It uses simplex projection for the weights and spectral
 soft-thresholding for the penalty matrices, with a shared threshold over all
-pairs in a group. With no groups, each penalty block contains one feature
-matrix; with `alpha=0`, there are no penalty variables.
+pairs in a group. Each block shares one nuclear-norm budget of `alpha` across
+its matrices; an individual feature is a singleton block. Projection processes
+each block once and batches consecutive blocks of the same size, keeping their
+budgets independent.
+With `alpha=0`, there are no penalty variables.
 
 The dual objective is a smooth convex quadratic. Its curvature supplies the
 step sizes, and low-rank metric computations avoid evaluating the dataset's

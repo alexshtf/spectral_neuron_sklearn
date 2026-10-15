@@ -1,6 +1,7 @@
 """Spectral-norm and anchored categorical-diameter penalties."""
 
 from functools import cache
+from itertools import groupby
 from numbers import Integral
 
 import numpy as np
@@ -20,7 +21,9 @@ class SpectralPenalty:
     Each group's first feature matrix is fixed to zero and omitted from
     ``free``. ``D`` maps the remaining coefficient matrices to pairwise
     differences and ungrouped matrices. Each ``blocks`` slice shares one
-    nuclear-norm budget in the penalty's dual representation.
+    nuclear-norm budget in the penalty's dual representation. Individual
+    features are singleton blocks; consecutive equal-width blocks are batched
+    while keeping their budgets independent.
     """
 
     def __init__(self, n_features, dim, alpha=0.0, onehot_groups=None):
@@ -78,7 +81,16 @@ class SpectralPenalty:
             inverses.append(recovery)
             self.blocks.append(slice(offset, offset + len(i)))
             offset += len(i)
+        self._block_runs = []
+        for width, blocks in groupby(self.blocks, key=lambda block: block.stop - block.start):
+            blocks = tuple(blocks)
+            self._block_runs.append((blocks[0].start, blocks[-1].stop, width))
+        self._block_starts = np.array([block.start for block in self.blocks], dtype=np.intp)
         self.D = np.vstack(differences)
+        # Precompute the rank divisors used in each block's threshold.
+        self._projection_ranks = np.arange(
+            1, max(width for _, _, width in self._block_runs) * dim + 1, dtype=float,
+        )
         self._inverse = np.hstack(inverses)
         self._operator = self.D if alpha else self.D[:0]
         self.norm_squared = max([
@@ -90,7 +102,8 @@ class SpectralPenalty:
         differences = self.D @ np.asarray(coefficients).reshape(self.shape)
         eigenvalues = np.linalg.eigvalsh(_symmetric_matrices(differences, self.dim))
         norms = np.max(np.abs(eigenvalues), axis=-1)
-        return float(sum(norms[block].max() for block in self.blocks))
+        # Accumulate the block maxima in block order.
+        return float(sum(np.maximum.reduceat(norms, self._block_starts)))
 
     def __call__(self, coefficients):
         return self.alpha * self.unweighted_value(coefficients) if self.alpha else 0.0
@@ -104,17 +117,24 @@ class SpectralPenalty:
         return (self._operator.T @ differences).ravel()
 
     def project(self, dual):
-        """Project onto nuclear-norm balls, returning the clipped complement."""
+        """Return the projection onto block nuclear-norm balls and its normal.
+
+        Reconstruct the normal by spectral clipping so inactive blocks remain
+        exactly zero.
+        """
         if not self.alpha:
             return np.zeros_like(dual), dual.copy()
         eigenvalues, vectors = np.linalg.eigh(_symmetric_matrices(dual, self.dim))
-        ordered = np.sort(np.abs(eigenvalues), axis=-1)[:, ::-1]
-        thresholds = (np.cumsum(ordered, axis=-1) - self.alpha) / np.arange(1, self.dim + 1)
-        caps = np.maximum(thresholds.max(axis=-1), 0.0)
-        for block in self.blocks[:len(self.groups)]:
-            ordered = np.sort(np.abs(eigenvalues[block]).ravel())[::-1]
-            thresholds = (np.cumsum(ordered) - self.alpha) / np.arange(1, len(ordered) + 1)
-            caps[block] = max(0.0, thresholds.max())
+        caps = np.empty_like(eigenvalues[:, 0])
+        for start, stop, width in self._block_runs:
+            # Each row pools the eigenvalues of one block's matrices.
+            ordered = np.abs(eigenvalues[start:stop]).reshape(-1, width * self.dim)
+            ordered.sort(axis=-1)
+            thresholds = (
+                ordered[:, ::-1].cumsum(axis=-1) - self.alpha
+            ) / self._projection_ranks[:ordered.shape[1]]
+            caps[start:stop].reshape(-1, width)[:] = thresholds.max(axis=-1, keepdims=True)
+        np.maximum(caps, 0.0, out=caps)
         clipped = np.clip(eigenvalues, -caps[:, None], caps[:, None])
         soft = np.sign(eigenvalues) * np.maximum(np.abs(eigenvalues) - caps[:, None], 0.0)
         i, j, factors = _packing(self.dim)
